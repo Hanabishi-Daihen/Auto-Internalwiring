@@ -124,11 +124,12 @@
     }
     const groups = new Map();
     for (let i = 0; i < n; i++) { const r = f(i); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(i); }
-    return Array.from(groups.values()).map((g) => mk(g.map((i) => small[i].polys)));
+    const idx = []; paths.forEach((p, i) => { if (p.stroke && !p.fill && Math.max(p.bbox[2] - p.bbox[0], p.bbox[3] - p.bbox[1]) < SMALL) idx.push(i); });
+    return Array.from(groups.values()).map((g) => mk(g.map((i) => small[i].polys), g.map((i) => idx[i])));
   }
-  function mk(pathPolys) {
+  function mk(pathPolys, src) {
     const polys = pathPolys.flat();
-    return { polys: polys, bbox: bboxOf(polys), paths: pathPolys };
+    return { polys: polys, bbox: bboxOf(polys), paths: pathPolys, src: src || [] };
   }
   function isLine(c) {
     const w = c.bbox[2] - c.bbox[0], h = c.bbox[3] - c.bbox[1];
@@ -139,12 +140,15 @@
   function readPage(paths, reader) {
     // endpoints of every stroke, used to recognise terminal circles (a wire ends on the circle)
     const E = [];
-    for (const p of paths) if (p.stroke) for (const pl of p.polys) { E.push(pl[0]); E.push(pl[pl.length - 1]); }
+    paths.forEach((p, i) => { if (p.stroke) for (const pl of p.polys) { E.push([pl[0][0], pl[0][1], i]); E.push([pl[pl.length - 1][0], pl[pl.length - 1][1], i]); } });
     const terminalCircle = (c) => {
       const w = c.bbox[2] - c.bbox[0], h = c.bbox[3] - c.bbox[1];
-      if (!(w > 1.0 && w < 4 && w / Math.max(h, 1e-6) > 0.85 && w / Math.max(h, 1e-6) < 1.18) || c.paths.length > 2) return false;
-      const cx = (c.bbox[0] + c.bbox[2]) / 2, cy = (c.bbox[1] + c.bbox[3]) / 2, r = (w + h) / 4;
-      for (const p of E) { const d = Math.hypot(p[0] - cx, p[1] - cy); if (d > r - 0.25 && d < r + 0.25) return true; }
+      if (!(w > 1.0 && w < 6.2 && w / Math.max(h, 1e-6) > 0.85 && w / Math.max(h, 1e-6) < 1.18) || c.paths.length > 2) return false;
+      const own = new Set(c.src), cx = (c.bbox[0] + c.bbox[2]) / 2, cy = (c.bbox[1] + c.bbox[3]) / 2, r = (w + h) / 4;
+      for (const p of E) {
+        if (own.has(p[2])) continue;
+        const d = Math.hypot(p[0] - cx, p[1] - cy); if (d > r - 0.3 && d < r + 0.3) return true;
+      }
       return false;
     };
     const splitTouching = (c) => {
@@ -154,7 +158,7 @@
       for (const axis of [0, 1]) {
         const order = P.map((_, i) => i).sort((a, b) => Math.min(...P[a].flat().map((q) => q[axis])) - Math.min(...P[b].flat().map((q) => q[axis])));
         for (let k = 1; k < P.length; k++) {
-          const a = mk(order.slice(0, k).map((i) => P[i])), b = mk(order.slice(k).map((i) => P[i]));
+          const a = mk(order.slice(0, k).map((i) => P[i]), order.slice(0, k).map((i) => c.src[i])), b = mk(order.slice(k).map((i) => P[i]), order.slice(k).map((i) => c.src[i]));
           const ba = reader.classify(a.polys), bb = reader.classify(b.polys);
           const sz = (x) => Math.max(x.bbox[2] - x.bbox[0], x.bbox[3] - x.bbox[1]);
           const sa = Math.max(sz(a) >= 1.2 ? top(ba) : 0, isLine(a) ? 0.85 : 0), sb = Math.max(sz(b) >= 1.2 ? top(bb) : 0, isLine(b) ? 0.85 : 0);
@@ -237,17 +241,25 @@
       const [X0, Y0, X1, Y1] = it.bbox;
       for (const w of words) {
         const b = w.bbox, Hm = w.H, r = w.rot;
-        if (it.kind === 'hline' && r === 0 && !w.prefix && Math.abs((Y0 + Y1) / 2 - (b[1] + b[3]) / 2) < 0.25 * Hm && b[0] - X1 >= 0 && b[0] - X1 < 0.8 * Hm && it.w > 0.25 * Hm && it.w < Hm) { w.prefix = '-'; w.bbox = [X0, b[1], b[2], b[3]]; break; }
-        if (it.kind === 'vline' && r === 1 && !w.prefix && Math.abs((X0 + X1) / 2 - (b[0] + b[2]) / 2) < 0.25 * Hm && Y0 - b[3] >= 0 && Y0 - b[3] < 0.8 * Hm && it.h > 0.25 * Hm && it.h < Hm) { w.prefix = '-'; w.bbox = [b[0], b[1], b[2], Y1]; break; }
+        if (it.kind === 'hline' && r === 0 && !w.prefix && Math.abs((Y0 + Y1) / 2 - (b[1] + b[3]) / 2) < 0.25 * Hm && b[0] - X1 >= 0 && b[0] - X1 < 0.8 * Hm && it.w > 0.25 * Hm && it.w < Hm) { w.prefix = '-'; w.bbox = [X0, b[1], b[2], b[3]]; it.used = true; break; }
+        if (it.kind === 'vline' && r === 1 && !w.prefix && Math.abs((X0 + X1) / 2 - (b[0] + b[2]) / 2) < 0.25 * Hm && Y0 - b[3] >= 0 && Y0 - b[3] < 0.8 * Hm && it.h > 0.25 * Hm && it.h < Hm) { w.prefix = '-'; w.bbox = [b[0], b[1], b[2], Y1]; it.used = true; break; }
         if (it.kind === 'dot') {
           const cx = (X0 + X1) / 2, cy = (Y0 + Y1) / 2;
-          if (r === 0 && Math.abs(cy - b[3]) < 0.25 * Hm && b[0] < cx && cx < b[2]) { (w.dots = w.dots || []).push(cx); break; }
-          if (r === 1 && Math.abs(cx - b[2]) < 0.25 * Hm && b[1] < cy && cy < b[3]) { (w.dots = w.dots || []).push(-cy); break; }
-          if (r === 2 && Math.abs(cx - b[0]) < 0.25 * Hm && b[1] < cy && cy < b[3]) { (w.dots = w.dots || []).push(cy); break; }
+          if (r === 0 && Math.abs(cy - b[3]) < 0.25 * Hm && b[0] < cx && cx < b[2]) { (w.dots = w.dots || []).push(cx); it.used = true; break; }
+          if (r === 1 && Math.abs(cx - b[2]) < 0.25 * Hm && b[1] < cy && cy < b[3]) { (w.dots = w.dots || []).push(-cy); it.used = true; break; }
+          if (r === 2 && Math.abs(cx - b[0]) < 0.25 * Hm && b[1] < cy && cy < b[3]) { (w.dots = w.dots || []).push(cy); it.used = true; break; }
         }
       }
     }
+    // cross references are written '/08.B1': join '/08' and 'B1' split by the dot gap
+    for (const a of words) {
+      if (a.rot !== 0 || !/^\/\d{1,2}$/.test(a.text)) continue;
+      const b = words.find((x) => x !== a && x.rot === 0 && /^[A-I]\d{1,2}$/.test(x.text) && Math.abs(x.bbox[3] - a.bbox[3]) < 0.3 * a.H && x.bbox[0] - a.bbox[2] > 0 && x.bbox[0] - a.bbox[2] < 1.6 * a.H);
+      if (b) { a.text = a.text + '.' + b.text; a.bbox = [a.bbox[0], Math.min(a.bbox[1], b.bbox[1]), b.bbox[2], Math.max(a.bbox[3], b.bbox[3])]; a.members = a.members.concat(b.members); b.dead = true; a.joined = true; }
+    }
+    for (let k = words.length - 1; k >= 0; k--) if (words[k].dead) words.splice(k, 1);
     for (const w of words) {
+      if (w.joined) { w.text = w.prefix + w.text; w.chars = w.members.map((i) => chars[i]); delete w.members; continue; }
       let t = fixO0(w.text);
       if (w.dots) {
         const pos = w.members.map((i) => { const bb = chars[i].bbox; return w.rot === 0 ? (bb[0] + bb[2]) / 2 : w.rot === 1 ? -(bb[1] + bb[3]) / 2 : (bb[1] + bb[3]) / 2; });

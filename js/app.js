@@ -764,6 +764,7 @@
     const sel = $('#pPage');
     sel.innerHTML = Array.from({ length: pdfDoc.numPages }, (_, i) => `<option value="${i + 1}">หน้า ${i + 1}</option>`).join('');
     $('#pInfo').textContent = `${file.name} · ${pdfDoc.numPages} หน้า`;
+    if ($('#aPdfName')) $('#aPdfName').textContent = `${file.name} · ${pdfDoc.numPages} หน้า`;
     pdfPage = Math.min(pdfDoc.numPages, parseInt((project.meta.sheets || '1'), 10) || 1);
     sel.value = String(pdfPage);
     renderPdfPage();
@@ -1151,13 +1152,178 @@
     });
   }
 
+  // ---------------------------------------------------------------- automatic build from PDF
+  let autoResult = null;
+  const KEY_STORE = 'iwp.anthropic.key';
+  function autoCabRows() {
+    return $$('#aCabs tr[data-r]').map((tr) => ({ loc: tr.querySelector('[data-k=loc]').value.trim(), outline: tr.querySelector('[data-k=out]').value.trim() }))
+      .filter((r) => r.loc);
+  }
+  function renderAutoCabs(rows) {
+    $('#aCabs').innerHTML = '<tr><th>ตู้ (LOC.)</th><th>หน้า Outline ของตู้นี้</th><th></th></tr>' + rows.map((r, i) =>
+      `<tr data-r="${i}"><td><input data-k="loc" value="${esc(r.loc)}" placeholder="เช่น LCC."></td><td><input data-k="out" value="${esc(r.outline)}" placeholder="เช่น 30 หรือ 3-4"></td><td><button class="iconbtn" data-delcab="${i}">✕</button></td></tr>`).join('');
+  }
+  function autoLog(msg, frac) {
+    const el = $('#aLog'); el.textContent += msg + '\n'; el.scrollTop = el.scrollHeight;
+    if (frac != null) { $('#aProg').hidden = false; $('#aBar').style.width = Math.round(frac * 100) + '%'; }
+  }
+  function updateCost() {
+    const pages = window.AutoBuild.parsePages($('#aSch').value, pdfDoc ? pdfDoc.numPages : 0).length;
+    const opus = $('#aModel').value === 'claude-opus-5-5';
+    const lo = opus ? 0.12 : 0.06, hi = opus ? 0.3 : 0.15;
+    $('#aCost').textContent = pages ? `ค่าใช้จ่ายโดยประมาณ ${pages} หน้า × $${lo}–${hi} ≈ $${(pages * lo).toFixed(1)}–${(pages * hi).toFixed(1)} (ขึ้นกับความซับซ้อนของแบบ)` : '';
+  }
+  async function runAuto() {
+    if (!pdfDoc) { toast('เลือกไฟล์ Schematic PDF ก่อน'); return; }
+    const A = window.AutoBuild;
+    const pages = A.parsePages($('#aSch').value, pdfDoc.numPages);
+    const cabs = autoCabRows();
+    if (!pages.length) { toast('ใส่หน้า Schematic เช่น 7-22'); return; }
+    if (!cabs.length) { toast('ใส่ชื่อตู้อย่างน้อย 1 ตู้'); return; }
+    const method = ($$('input[name=aMethod]').find((r) => r.checked) || {}).value || 'A';
+    const key = $('#aKey').value.trim();
+    if (method === 'B' && !key) { toast('ใส่ Anthropic API key สำหรับวิธี B'); return; }
+    try { if ($('#aKeyRemember').checked && key) localStorage.setItem(KEY_STORE, key); else localStorage.removeItem(KEY_STORE); } catch (e) { /* ignore */ }
+    $('#aLog').textContent = ''; $('#aResult').hidden = true; $('#aRun').disabled = true;
+    const t0 = Date.now();
+    try {
+      const cabinets = cabs.map((c) => c.loc);
+      const prog = async (m, f) => { autoLog(m, f * 0.8); await new Promise((r) => setTimeout(r, 0)); };
+      let sheets;
+      if (method === 'A') {
+        sheets = await A.readSheetsA(pdfDoc, pages, window.pdfjsLib.OPS, window.GLYPH_TEMPLATES, prog);
+      } else {
+        const r = await A.readSheetsB(pdfDoc, pages, { apiKey: key, model: $('#aModel').value, cabinets: cabinets }, prog);
+        sheets = r.sheets;
+        autoLog(`AI ใช้ token: input ${r.usage.input.toLocaleString()} · output ${r.usage.output.toLocaleString()}`);
+        sheets.forEach((s) => (s.notes || []).forEach((n) => autoLog(`  Sheet ${s.sheet}: ${n}`)));
+      }
+      autoLog('รวม node ข้ามหน้าและคัดสายภายในตู้…', 0.82);
+      const merged = A.mergeSheets(sheets, { cabinets: cabinets });
+      const outlines = [];
+      const multi = cabinets.length > 1;
+      for (const c of cabs) {
+        const L = c.loc.replace(/^\+/, '').replace(/\.$/, '').toUpperCase();
+        const wanted = Array.from(merged.devices.entries()).filter(([, d]) => d.loc.replace(/\.$/, '') === L).map(([k]) => k);
+        for (const pg of A.parsePages(c.outline, pdfDoc.numPages)) {
+          autoLog(`อ่าน Outline หน้า ${pg} (${c.loc})…`, 0.86);
+          const o = await A.readOutline(pdfDoc, pg, window.pdfjsLib.OPS, window.GLYPH_TEMPLATES, wanted);
+          o.loc = multi ? L + '.' : c.loc;
+          outlines.push(o);
+          autoLog(`  พบตำแหน่งอุปกรณ์ ${Object.keys(o.positions).length}/${wanted.length} · รางวายเวย์ ${o.wireways.length}`);
+        }
+      }
+      autoResult = { method: method, pages: pages, cabs: cabs, sheets: sheets, merged: merged, outlines: outlines, exclude: new Set() };
+      autoLog(`เสร็จใน ${((Date.now() - t0) / 1000).toFixed(1)} วินาที`, 1);
+      renderAutoReview();
+    } catch (err) {
+      console.error(err);
+      autoLog('ผิดพลาด: ' + (err && err.message ? err.message : err));
+      toast('รันไม่สำเร็จ: ' + (err && err.message ? err.message : err), 7000);
+    }
+    $('#aRun').disabled = false;
+  }
+  function netFlags(n) {
+    const f = [];
+    if (/^N\d+$/.test(n.wire)) f.push('ไม่มีเบอร์สาย');
+    if (n.remark && /หลายเบอร์/.test(n.remark)) f.push('หลายเบอร์ใน node');
+    if (n.pins.length === 2 && n.pins.every((p) => /^(\+[A-Z0-9]+)?-(TB|X)/i.test(p[0]))) f.push('มีแต่ขั้ว Terminal');
+    if (n.pins.some((p) => !/^(\+[A-Z0-9]+)?-[A-Z0-9]/i.test(p[0]))) f.push('ชื่ออุปกรณ์ผิดรูปแบบ');
+    return f;
+  }
+  function renderAutoReview() {
+    const r = autoResult; if (!r) return;
+    const nets = r.merged.nets, placedKeys = new Set(r.outlines.flatMap((o) => Object.keys(o.positions)));
+    const flagged = nets.filter((n) => netFlags(n).length).length;
+    const devs = Array.from(r.merged.devices.keys());
+    const unplaced = devs.filter((k) => !placedKeys.has(k));
+    $('#aCards').innerHTML = [
+      ['วิธีอ่าน', r.method === 'A' ? 'A · ออฟไลน์' : 'B · AI', `${r.pages.length} หน้า Schematic`],
+      ['node สายภายใน', nets.length, `${nets.reduce((s, n) => s + n.pins.length - 1, 0)} เส้นโดยประมาณ`],
+      ['ควรตรวจ', flagged, 'ไม่มีเบอร์สาย / มีแต่ Terminal ฯลฯ'],
+      ['อุปกรณ์', devs.length, `วางจาก Outline ได้ ${devs.length - unplaced.length} · ยังไม่วาง ${unplaced.length}`]
+    ].map((c) => `<div class="card ${c[0] === 'ควรตรวจ' && c[1] ? 'warn' : ''}"><div class="k">${esc(c[0])}</div><div class="v">${esc(c[1])}</div><div class="s">${esc(c[2])}</div></div>`).join('');
+    const warn = r.merged.warnings.slice(0, 30);
+    if (unplaced.length) warn.unshift('อุปกรณ์ที่ยังไม่พบตำแหน่งใน Outline: ' + unplaced.slice(0, 40).join(', ') + (unplaced.length > 40 ? ' …' : ''));
+    if (r.method === 'A') warn.unshift('วิธี A อ่านจากรูปทรงเส้นและตัวอักษร — ทดสอบกับ PP1047A หาขาภายในได้ราว 2 ใน 3 จุด ควรตรวจเทียบแบบทุก Sheet ในแท็บ Netlist (ปุ่ม 📄 เปิดหน้าแบบ)');
+    $('#aWarn').innerHTML = warn.map((w) => `<li>${esc(w)}</li>`).join('');
+    const only = $('#aOnlyFlag').checked;
+    let shown = 0;
+    $('#aNets').innerHTML = '<tr><th>ใช้</th><th>Sheet</th><th>เบอร์สาย</th><th>ขาใน node</th><th>ควรตรวจ</th></tr>' + nets.map((n, i) => {
+      const fl = netFlags(n);
+      if (only && !fl.length) return '';
+      shown++;
+      return `<tr><td><input type="checkbox" data-anet="${i}" ${r.exclude.has(i) ? '' : 'checked'}></td><td>${esc(n.sheet)}</td><td class="mono"><b>${esc(n.wire)}</b></td>` +
+        `<td class="mono">${esc(n.pins.map((p) => p[0] + (p[1] !== n.sheet ? '@' + p[1] : '')).join('  '))}</td><td class="flag">${esc(fl.concat(n.remark && !/หลายเบอร์|ชั่วคราว/.test(n.remark) ? [n.remark] : []).join(' · '))}</td></tr>`;
+    }).join('');
+    $('#aCount').textContent = `${shown} / ${nets.length} node`;
+    $('#aResult').hidden = false;
+  }
+  async function applyAuto() {
+    const r = autoResult; if (!r) return;
+    if (!confirm('สร้างโปรเจกต์ใหม่จากผลนี้ (แทนที่โปรเจกต์ปัจจุบัน)?')) return;
+    const cabinets = r.cabs.map((c) => c.loc);
+    const proc = $('#aProc').value.trim() || 'NEW';
+    const P = migrate({
+      version: BASE.version,
+      meta: {
+        project: $('#aProj').value.trim() || '(TBD)', processNo: proc, schematicDwg: pdfName.replace(/\.pdf$/i, ''), drawingNo: '(TBD)',
+        contract: '(TBD)', loc: cabinets[0], panelName: cabinets.join(' / '),
+        title: `${cabinets[0].replace(/\.$/, '')} INTERNAL CABLE WIRING ${proc}`, rev: '0',
+        sheets: `${r.pages[0]}-${r.pages[r.pages.length - 1]}`, outlineSheet: r.cabs.map((c) => c.outline).join(',')
+      },
+      cable: clone(NEW_CABLE), views: {}, wireways: [], portals: [], devices: {}, terminals: {}, bars: {}, nets: [],
+      backgrounds: {}, anomalies: [], noInternal: {}
+    });
+    project = P;
+    for (const o of r.outlines) {
+      const page = await pdfDoc.getPage(o.page);
+      const id = 'bg' + o.page;
+      await setBackgroundFromPdf(page, page.getViewport({ scale: 1 }), id, `${pdfName.replace(/\.pdf$/i, '')} หน้า ${o.page}`, o.page, o.loc);
+      o.bg = id;
+    }
+    const merged = Object.assign({}, r.merged, { nets: r.merged.nets.filter((_, i) => !r.exclude.has(i)) });
+    window.AutoBuild.buildProject(P, merged, r.outlines, {});
+    P.anomalies = (P.anomalies || []).concat([`สร้างอัตโนมัติด้วยวิธี ${r.method === 'A' ? 'A (ออฟไลน์)' : 'B (AI)'} จาก ${pdfName} หน้า ${P.meta.sheets} — ตรวจเทียบแบบก่อนใช้งาน`]);
+    big.bg = mini.bg = Object.keys(P.backgrounds)[0] || null; big._fitted = mini._fitted = false; selWire = null; selDev = null;
+    save(); recompute(); renderSettings(); refreshAll();
+    $('.tab[data-tab="overview"]').click();
+    toast('สร้างโปรเจกต์แล้ว — ตรวจ Netlist, วางอุปกรณ์ที่เหลือ และตั้งสี/ขนาดสายในแท็บตั้งค่า', 7000);
+  }
+  function bindAuto() {
+    renderAutoCabs([{ loc: project.meta.loc || 'TCC.', outline: String(project.meta.outlineSheet || '') }]);
+    $('#aSch').value = project.meta.sheets ? project.meta.sheets.replace(/^0/, '').replace(/-0/, '-') : '';
+    $('#aProc').value = project.meta.processNo || '';
+    try { const k = localStorage.getItem(KEY_STORE); if (k) { $('#aKey').value = k; $('#aKeyRemember').checked = true; } } catch (e) { /* ignore */ }
+    $('#aPdfFile').addEventListener('change', async (e) => {
+      const f = e.target.files[0]; if (!f) return;
+      try { await openPdf(f); $('#aPdfName').textContent = `${f.name} · ${pdfDoc.numPages} หน้า`; updateCost(); } catch (err) { toast('เปิด PDF ไม่ได้: ' + err.message); }
+      e.target.value = '';
+    });
+    $('#aAddCab').addEventListener('click', () => { const rows = autoCabRows(); rows.push({ loc: '', outline: '' }); renderAutoCabs(rows); });
+    $('#aCabs').addEventListener('click', (e) => {
+      const i = e.target.dataset && e.target.dataset.delcab; if (i === undefined) return;
+      const rows = autoCabRows(); rows.splice(+i, 1); renderAutoCabs(rows.length ? rows : [{ loc: '', outline: '' }]);
+    });
+    $$('input[name=aMethod]').forEach((r) => r.addEventListener('change', () => { $('#aAiBox').hidden = !$$('input[name=aMethod]').find((x) => x.value === 'B').checked; updateCost(); }));
+    ['#aSch', '#aModel'].forEach((s) => $(s).addEventListener('input', updateCost));
+    $('#aRun').addEventListener('click', runAuto);
+    $('#aApply').addEventListener('click', applyAuto);
+    $('#aOnlyFlag').addEventListener('change', renderAutoReview);
+    $('#aNets').addEventListener('change', (e) => {
+      const i = e.target.dataset && e.target.dataset.anet; if (i === undefined) return;
+      if (e.target.checked) autoResult.exclude.delete(+i); else autoResult.exclude.add(+i);
+    });
+  }
+
   // ---------------------------------------------------------------- start
   load();
   recompute();
   setupMaps();
   loadBg();
   bind();
+  bindAuto();
   renderSettings();
   refreshAll();
-  window.IWP = { get project() { return project; }, get wires() { return wires; }, get plan() { return plan; }, recompute: recompute, get maps() { return { mini: mini, big: big }; } };
+  window.IWP = { get project() { return project; }, get pdf() { return pdfDoc; }, get wires() { return wires; }, get plan() { return plan; }, recompute: recompute, get maps() { return { mini: mini, big: big }; } };
 })();

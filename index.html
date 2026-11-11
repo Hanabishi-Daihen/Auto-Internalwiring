@@ -29,6 +29,7 @@
 </header>
 
 <nav class="tabs" role="tablist">
+  <button class="tab" data-tab="auto">⚡ อัตโนมัติจาก PDF</button>
   <button class="tab active" data-tab="overview">ภาพรวม</button>
   <button class="tab" data-tab="wires">รายการสาย (Wiring list)</button>
   <button class="tab" data-tab="layout">ผังอุปกรณ์ (Outline)</button>
@@ -39,6 +40,61 @@
 
 <main>
   <!-- ============================ OVERVIEW -->
+  <section class="panel" id="tab-auto">
+    <div class="grid2">
+      <div class="box">
+        <h3>1. แบบและช่วงหน้า</h3>
+        <div class="form">
+          <label>ไฟล์ Schematic PDF<span class="row"><span id="aPdfName" class="hint">ยังไม่ได้เปิด</span>
+            <label class="btn small ghost"><input type="file" id="aPdfFile" accept="application/pdf" hidden>📄 เลือกไฟล์</label></span></label>
+          <label><span class="lbl">หน้า Schematic (เลขหน้า PDF) เช่น <code>7-22</code> หรือ <code>16-38</code></span><input id="aSch" placeholder="7-22"></label>
+        </div>
+        <h3 style="margin-top:14px">ตู้และหน้า Outline</h3>
+        <table class="grid" id="aCabs"></table>
+        <div class="rowbtn" style="margin-top:6px"><button class="btn small ghost" id="aAddCab">+ เพิ่มตู้</button></div>
+        <p class="note">หน้า Outline ใส่ได้หลายหน้า เช่น <code>3-4</code> · ถ้าแบบมี LCC และ RCC ในหน้าวงจรเดียวกัน ให้ใส่ทั้งสองตู้ โปรแกรมแยกจากกรอบประ +LCC / +RCC</p>
+        <div class="form">
+          <label>Process No.<input id="aProc" placeholder="เช่น PP1047A"></label>
+          <label>Project<input id="aProj" placeholder="(ไม่บังคับ)"></label>
+        </div>
+      </div>
+      <div class="box">
+        <h3>2. วิธีอ่านแบบ</h3>
+        <label class="radio"><input type="radio" name="aMethod" value="A" checked> <b>A · ออฟไลน์ในเครื่อง</b> — อ่านเส้นและตัวอักษร vector ด้วยแม่แบบฟอนต์ CAD ไม่ส่งข้อมูลออกนอกเครื่อง ไม่มีค่าใช้จ่าย</label>
+        <label class="radio"><input type="radio" name="aMethod" value="B"> <b>B · AI (Claude API)</b> — ส่งภาพแต่ละหน้าไปให้ AI อ่าน แม่นกว่าสำหรับแบบที่ซับซ้อน ต้องใช้อินเทอร์เน็ตและ API key มีค่าใช้จ่ายต่อหน้า</label>
+        <div class="form" id="aAiBox" hidden>
+          <label>Anthropic API key<input id="aKey" type="password" placeholder="sk-ant-..." autocomplete="off"></label>
+          <label class="chk"><input type="checkbox" id="aKeyRemember"> จำ key ไว้ในเบราว์เซอร์นี้ (ไม่บันทึกลงไฟล์โปรเจกต์)</label>
+          <label>รุ่น AI<select id="aModel">
+            <option value="claude-opus-5-5">Claude Opus 5.5 (แม่นที่สุด)</option>
+            <option value="claude-sonnet-5-5">Claude Sonnet 5.5 (ถูกกว่า)</option>
+          </select></label>
+          <p class="note" id="aCost"></p>
+          <p class="note">ภาพแบบจะถูกส่งไปประมวลผลที่ Anthropic — ตรวจนโยบายความลับของบริษัท/ลูกค้าก่อนใช้</p>
+        </div>
+        <div class="rowbtn" style="margin-top:12px">
+          <button class="btn primary" id="aRun">▶ รันอ่านแบบและสร้าง Internal wiring</button>
+        </div>
+        <div class="progress" id="aProg" hidden><div class="bar" id="aBar"></div></div>
+        <pre class="log" id="aLog"></pre>
+      </div>
+    </div>
+    <div class="box" id="aResult" hidden>
+      <h3>3. ตรวจทานผล</h3>
+      <div class="cards" id="aCards"></div>
+      <ul class="warnlist" id="aWarn"></ul>
+      <div class="toolbar">
+        <label class="chk"><input type="checkbox" id="aOnlyFlag"> เฉพาะรายการที่ควรตรวจ</label>
+        <span class="count" id="aCount"></span>
+      </div>
+      <div class="tablewrap" style="max-height:52vh"><table class="grid" id="aNets"></table></div>
+      <div class="rowbtn" style="margin-top:10px">
+        <button class="btn primary" id="aApply">✔ สร้างโปรเจกต์จากผลนี้</button>
+        <span class="hint">จะแทนที่โปรเจกต์ปัจจุบัน (กด 💾 บันทึกโปรเจกต์ ไว้ก่อนถ้าต้องการ) — แก้ไขต่อได้ในแท็บ Netlist / ผังอุปกรณ์</span>
+      </div>
+    </div>
+  </section>
+
   <section class="panel active" id="tab-overview">
     <div class="cards" id="statCards"></div>
     <div class="grid2">
@@ -192,6 +248,12 @@
 <script src="data/pp1047a_tcc.js"></script>
 <script src="js/engine.js"></script>
 <script src="js/export.js"></script>
+<script src="vendor/anthropic-sdk.min.js"></script>
+<script src="data/glyph_templates.js"></script>
+<script src="js/pdfvec.js"></script>
+<script src="js/glyphocr.js"></script>
+<script src="js/schematic.js"></script>
+<script src="js/autobuild.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

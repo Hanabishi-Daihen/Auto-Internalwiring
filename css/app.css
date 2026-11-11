@@ -147,3 +147,17 @@ table.grid td textarea { font-family: "Consolas", "Menlo", monospace; resize: ve
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .toast { position: fixed; right: 16px; bottom: 16px; background: #14213d; color: #fff; padding: 10px 14px; border-radius: 10px; z-index: 60; box-shadow: var(--shadow); max-width: 420px; }
 .toast[hidden] { display: none; }
+
+/* ---------- auto tab */
+.radio { display: block; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 8px; font-size: 13.5px; cursor: pointer; }
+.radio:has(input:checked) { border-color: var(--accent); background: var(--sel); }
+.row { display: flex; gap: 8px; align-items: center; }
+.progress { height: 8px; background: #e5e9f0; border-radius: 6px; overflow: hidden; margin-top: 12px; }
+.progress .bar { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+.log { background: #0f172a; color: #cbd5e1; border-radius: 8px; padding: 8px 10px; font-size: 12px; max-height: 180px; overflow: auto; white-space: pre-wrap; margin-top: 10px; min-height: 40px; }
+.flag { color: var(--warn); font-size: 12px; }
+[hidden] { display: none !important; }
+.form label.chk { display: inline-flex; color: var(--ink); }
+.form label code { display: inline; }
+.form .lbl { display: block; }
+#aCabs th { position: static; }
