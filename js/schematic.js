@@ -248,10 +248,17 @@
     // terminal rows: circles on one line share the '-TB..' / '-X..' label written left of (or above) the row
     const tbLabels = devLabels.filter((w) => /^-(TB|X\d|TBL|X-|TB-)/.test(w.text));
     const rows = [];
-    termCircles.slice().sort((a, b) => (a.y - b.y) || (a.x - b.x)).forEach((tc) => {
-      const r = rows.find((q) => Math.abs(q.y - tc.y) < 1.2 && tc.x - q.xs[q.xs.length - 1] < 60);
-      if (r) { r.items.push(tc); r.xs.push(tc.x); } else rows.push({ y: tc.y, xs: [tc.x], items: [tc] });
-    });
+    // bands of equal y (circles of one row may differ by a fraction of a point), split where x jumps
+    const byY = termCircles.slice().sort((a, b) => a.y - b.y), bands = [];
+    byY.forEach((tc) => { const bd = bands[bands.length - 1]; if (bd && tc.y - bd[0].y < 1.2) bd.push(tc); else bands.push([tc]); });
+    for (const bd of bands) {
+      bd.sort((a, b) => a.x - b.x);
+      let cur = null;
+      for (const tc of bd) {
+        if (!cur || tc.x - cur.xs[cur.xs.length - 1] >= 60) { cur = { y: tc.y, xs: [], items: [] }; rows.push(cur); }
+        cur.items.push(tc); cur.xs.push(tc.x);
+      }
+    }
     for (const r of rows) {
       for (const tc of r.items) {
         tc.block = tbLabels.filter((w) => w.bbox[2] <= tc.x + 2 && tc.x - w.bbox[2] < 45 && Math.abs(w.c[1] - tc.y) < 14)
