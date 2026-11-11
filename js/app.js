@@ -1227,6 +1227,7 @@
     const f = [];
     if (/^N\d+$/.test(n.wire)) f.push('ไม่มีเบอร์สาย');
     if (n.remark && /หลายเบอร์/.test(n.remark)) f.push('หลายเบอร์ใน node');
+    if (n.remark && /ชื่อขั้ว/.test(n.remark)) f.push('เบอร์สายเดาจากชื่อขั้ว');
     if (n.pins.length === 2 && n.pins.every((p) => /^(\+[A-Z0-9]+)?-(TB|X)/i.test(p[0]))) f.push('มีแต่ขั้ว Terminal');
     if (n.pins.some((p) => !/^(\+[A-Z0-9]+)?-[A-Z0-9]/i.test(p[0]))) f.push('ชื่ออุปกรณ์ผิดรูปแบบ');
     return f;
@@ -1254,7 +1255,7 @@
       if (only && !fl.length) return '';
       shown++;
       return `<tr><td><input type="checkbox" data-anet="${i}" ${r.exclude.has(i) ? '' : 'checked'}></td><td>${esc(n.sheet)}</td><td class="mono"><b>${esc(n.wire)}</b></td>` +
-        `<td class="mono">${esc(n.pins.map((p) => p[0] + (p[1] !== n.sheet ? '@' + p[1] : '')).join('  '))}</td><td class="flag">${esc(fl.concat(n.remark && !/หลายเบอร์|ชั่วคราว/.test(n.remark) ? [n.remark] : []).join(' · '))}</td></tr>`;
+        `<td class="mono">${esc(n.pins.map((p) => p[0] + (p[1] !== n.sheet ? '@' + p[1] : '')).join('  '))}</td><td class="flag">${esc(fl.concat(n.remark && !/หลายเบอร์|ชั่วคราว|ชื่อขั้ว/.test(n.remark) ? [n.remark] : []).join(' · '))}</td></tr>`;
     }).join('');
     $('#aCount').textContent = `${shown} / ${nets.length} node`;
     $('#aResult').hidden = false;

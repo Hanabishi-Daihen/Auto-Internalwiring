@@ -125,13 +125,49 @@
       }
     }
     // ---- wire segments
+    // component bodies: small closed rectangles (overload relay, MCB, coil boxes). Strokes inside a body
+    // are the symbol's internals (e.g. the heater loop that runs straight from pin 1 to pin 2), not wiring.
+    const bodies = [];
+    paths.forEach((p, i) => {
+      if (!p.stroke || textPath.has(i) || p.polys.length !== 1) return;
+      const pl = p.polys[0];
+      if (pl.length !== 5 || Math.hypot(pl[0][0] - pl[4][0], pl[0][1] - pl[4][1]) > 0.05) return;
+      for (let k = 0; k < 4; k++) if (Math.abs(pl[k][0] - pl[k + 1][0]) > 0.05 && Math.abs(pl[k][1] - pl[k + 1][1]) > 0.05) return;
+      const w = p.bbox[2] - p.bbox[0], h = p.bbox[3] - p.bbox[1];
+      if (w < 3 || h < 3 || w > 40 || h > 40) return;
+      bodies.push(p.bbox); textPath.add(i);
+    });
+    const clipOut = (s) => {   // pieces of s outside every body
+      let pieces = [s];
+      for (const b of bodies) {
+        const next = [];
+        for (const q of pieces) {
+          if (Math.max(q[0], q[2]) <= b[0] || Math.min(q[0], q[2]) >= b[2] || Math.max(q[1], q[3]) <= b[1] || Math.min(q[1], q[3]) >= b[3]) { next.push(q); continue; }
+          // Liang-Barsky: part of q inside b (shrunk a hair so wires ending on the outline survive)
+          const e = 0.05, dx = q[2] - q[0], dy = q[3] - q[1];
+          let t0 = 0, t1 = 1, ok = true;
+          [[-dx, q[0] - (b[0] + e)], [dx, (b[2] - e) - q[0]], [-dy, q[1] - (b[1] + e)], [dy, (b[3] - e) - q[1]]].forEach(([pp, qq]) => {
+            if (!ok) return;
+            if (Math.abs(pp) < 1e-9) { if (qq < 0) ok = false; return; }
+            const r = qq / pp;
+            if (pp < 0) t0 = Math.max(t0, r); else t1 = Math.min(t1, r);
+          });
+          if (!ok || t0 >= t1) { next.push(q); continue; }
+          if (t0 > 0) next.push([q[0], q[1], q[0] + dx * t0, q[1] + dy * t0]);
+          if (t1 < 1) next.push([q[0] + dx * t1, q[1] + dy * t1, q[2], q[3]]);
+        }
+        pieces = next;
+      }
+      return pieces;
+    };
     const segs = [];
     paths.forEach((p, i) => {
       if (!p.stroke || textPath.has(i)) return;
       for (const pl of p.polys) for (let k = 0; k + 1 < pl.length; k++) {
-        const s = [pl[k][0], pl[k][1], pl[k + 1][0], pl[k + 1][1]];
-        if (Math.hypot(s[2] - s[0], s[3] - s[1]) < 0.05) continue;
-        s.path = i; segs.push(s);
+        for (const s of clipOut([pl[k][0], pl[k][1], pl[k + 1][0], pl[k + 1][1]])) {
+          if (Math.hypot(s[2] - s[0], s[3] - s[1]) < 0.05) continue;
+          s.path = i; segs.push(s);
+        }
       }
     });
     const n = segs.length, par = new Int32Array(n).map((_, i) => i);
@@ -163,7 +199,12 @@
           if (eEnd) {
             // plain corner / continuation; a dot or exactly two ends make it a real joint
             u(i, j);
-          } else if (dist2seg(x, y, t) < EP && dotAt(x, y)) u(i, j);   // T-joint only with a junction dot
+          } else if (dist2seg(x, y, t) < EP) {
+            // T-joint only with a junction dot; a collinear overlap (wire drawn over a symbol lead) is one line
+            const ax = s[2] - s[0], ay = s[3] - s[1], bx = t[2] - t[0], by = t[3] - t[1];
+            const collinear = Math.abs(ax * by - ay * bx) < 1e-3 * Math.hypot(ax, ay) * Math.hypot(bx, by);
+            if (collinear || dotAt(x, y)) u(i, j);
+          }
         }
       }
     });
@@ -240,6 +281,7 @@
     // device pins: pin text beside a symbol lead; device = label left of the symbol, or the label at the
     // left end of a dashed mechanical link running through the symbol
     const used = new Set(termWords);
+    const pinCands = [];
     for (const w of W) {
       if (used.has(w) || RX.device.test(w.text) || RX.xref.test(w.text) || RX.loc.test(w.text)) continue;
       if (!RX.pin.test(w.text) || w.text.length > 4) continue;
@@ -253,9 +295,49 @@
         const ld = labelLeftOf(l.x0, l.y, 34, 15);
         if (ld && (!dev || dev[1] > 18)) dev = [ld[0], 18];
       }
-      if (!dev) continue;
-      nets[nn.net].pins.push({ dev: dev[0].text, pin: w.text, x: w.c[0], y: w.c[1], word: w, d: dev[1] });
+      pinCands.push({ w: w, nn: nn, dev: dev, linked: lk.length > 0 });
       used.add(w);
+    }
+    // multi-pole symbols: pins 1-3-5 (or 2-4-6) in one row belong to one device; the label of the
+    // NEXT device often sits just right of pin 5, so give the whole row the label left of its first pin
+    const rowsP = [];
+    pinCands.slice().sort((a, b) => (a.w.c[1] - b.w.c[1]) || (a.w.c[0] - b.w.c[0])).forEach((pc) => {
+      const r = rowsP.find((q) => {
+        const last = q[q.length - 1];
+        if (Math.abs(last.w.c[1] - pc.w.c[1]) > 1.0) return false;
+        const dx = pc.w.c[0] - last.w.c[0];
+        if (dx <= 0 || dx > 16) return false;
+        // a device label between the two pins starts a new device
+        return !devLabels.some((d) => d.bbox[0] > last.w.c[0] && d.bbox[2] < pc.w.c[0] + 1 && Math.abs(d.c[1] - pc.w.c[1]) < 14);
+      });
+      if (r) r.push(pc); else rowsP.push([pc]);
+    });
+    for (const r of rowsP) {
+      if (r.length >= 2 && !r.some((pc) => pc.linked)) {
+        const first = r[0];
+        const lab = labelLeftOf(first.w.c[0], first.w.c[1], 44, 24);
+        if (lab) r.forEach((pc) => { pc.dev = lab; });
+      }
+    }
+    // pins written above and below the same component box (1 over 2, 3 over 4 ...) are one device:
+    // the pin far from the label inherits the device found for its partner
+    const byBody = new Map();
+    for (const pc of pinCands) {
+      const w = pc.w;
+      const bi = bodies.findIndex((b) => w.c[0] >= b[0] && w.c[0] <= b[2] + 1 && Math.max(b[1] - w.bbox[3], w.bbox[1] - b[3]) < 8 && Math.max(b[1] - w.bbox[3], w.bbox[1] - b[3]) > -1);
+      if (bi < 0) continue;
+      if (!byBody.has(bi)) byBody.set(bi, []);
+      byBody.get(bi).push(pc);
+    }
+    for (const g of byBody.values()) {
+      const best = g.filter((pc) => pc.dev).sort((a, b) => a.dev[1] - b.dev[1])[0];
+      if (best) g.forEach((pc) => { if (!pc.dev || pc.dev[1] > best.dev[1] + 6) pc.dev = best.dev; });
+    }
+    for (const r of rowsP) {
+      for (const pc of r) {
+        if (!pc.dev) { used.delete(pc.w); continue; }
+        nets[pc.nn.net].pins.push({ dev: pc.dev[0].text, pin: pc.w.text, x: pc.w.c[0], y: pc.w.c[1], word: pc.w, d: pc.dev[1] });
+      }
     }
     // wire labels: label-like words close to a wire that are not pins
     for (const w of W) {
@@ -289,8 +371,15 @@
 
     const nodes = nets.filter((nt) => nt.pins.length + nt.terms.length >= 1 && nt.len > 2).map((nt) => {
       const lab = nt.labels.sort((a, b) => a.d - b.d)[0];
+      // no label on the wire: terminals are usually numbered after the wire they carry
+      // (TB01:R0 on wire R0, TB03:121 on wire 121), so one plausible terminal name stands in
+      let wire = lab ? lab.text : '', wireFrom = lab ? 'label' : '';
+      if (!wire) {
+        const tn = Array.from(new Set(nt.terms.map((t) => t.pin))).filter((p) => RX.wire.test(p) && !/^\d{1,2}$/.test(p));
+        if (tn.length === 1) { wire = tn[0]; wireFrom = 'terminal'; }
+      }
       return {
-        sheet: sheet, wire: lab ? lab.text : '', labels: nt.labels.map((l) => l.text),
+        sheet: sheet, wire: wire, wireFrom: wireFrom, labels: nt.labels.map((l) => l.text),
         pins: nt.pins.map((p) => ({ dev: p.dev, pin: p.pin, x: p.x, y: p.y, loc: locAt(p.x, p.y) })),
         terms: nt.terms.map((t) => Object.assign({}, t, { loc: locAt(t.x, t.y) })),
         xrefs: Array.from(new Set(nt.xrefs)), bbox: nt.bbox, len: nt.len

@@ -180,7 +180,7 @@
     items.forEach((it, i) => {
       const w = (it.nd.wire || '').trim();
       // the same wire number on another sheet is the same node (sheets continue through arrows)
-      if (!w || /^(E|PE|GND|0|\?)$/.test(w)) return;
+      if (!w || /^(E|PE|GND|0|\?)$/.test(w) || it.nd.wireFrom === 'terminal') return;
       if (!byWire.has(w)) byWire.set(w, []);
       byWire.get(w).push(i);
     });
@@ -216,10 +216,14 @@
         }
       }
       if (pins.length < 2) continue;
-      const wires = Array.from(new Set(g.map((it) => (it.nd.wire || '').trim()).filter(Boolean)));
+      // numbers written on the wire win over numbers taken from a terminal name
+      const named = (from) => Array.from(new Set(g.filter((it) => (it.nd.wireFrom === 'terminal') === from).map((it) => (it.nd.wire || '').trim()).filter(Boolean)));
+      const labelled = named(false), inferred = named(true);
+      const wires = labelled.length ? labelled : inferred;
       let wire = wires[0];
       const remark = [];
       if (!wire) { wire = 'N' + (++unnamed); remark.push('ไม่พบเบอร์สายในแบบ - ตั้งชื่อชั่วคราว'); }
+      else if (!labelled.length) remark.push('เบอร์สายจากชื่อขั้ว Terminal');
       if (wires.length > 1) remark.push('พบหลายเบอร์ใน node เดียวกัน: ' + wires.join(', '));
       if (ext) remark.push(`มีจุดต่อภายนอก ${ext} จุด (ตัดออก)`);
       nets.push({ wire: wire, sheet: g[0].sh, cls: '', pins: pins, fixed: [], remark: remark.join(' / '), auto: true });

@@ -104,8 +104,8 @@
     const segs = small.map((q) => segsOf(q.polys));
     const grid = new Map();
     small.forEach((q, i) => {
-      for (let gx = Math.floor(q.bbox[0] / 4); gx <= Math.floor(q.bbox[2] / 4); gx++)
-        for (let gy = Math.floor(q.bbox[1] / 4); gy <= Math.floor(q.bbox[3] / 4); gy++) {
+      for (let gx = Math.floor((q.bbox[0] - TOL) / 4); gx <= Math.floor((q.bbox[2] + TOL) / 4); gx++)
+        for (let gy = Math.floor((q.bbox[1] - TOL) / 4); gy <= Math.floor((q.bbox[3] + TOL) / 4); gy++) {
           const k = gx + ',' + gy; if (!grid.has(k)) grid.set(k, []); grid.get(k).push(i);
         }
     });
@@ -234,6 +234,22 @@
       const text = g.map((i) => (chars[i].best[r] || ['?'])[0]).join('');
       const bb = [Math.min(...g.map((i) => chars[i].bbox[0])), Math.min(...g.map((i) => chars[i].bbox[1])), Math.max(...g.map((i) => chars[i].bbox[2])), Math.max(...g.map((i) => chars[i].bbox[3]))];
       words.push({ text: text, rot: r, bbox: bb, members: g, H: g.reduce((s, i) => s + H(chars[i], r), 0) / g.length, prefix: '' });
+    }
+    // lone characters: follow the rotation of the text around them when that reading is nearly as good
+    // (a sideways '5' among sideways pin numbers otherwise reads as an upright 'C')
+    for (const w of words) {
+      if (w.members.length !== 1) continue;
+      const c = chars[w.members[0]], cx = (w.bbox[0] + w.bbox[2]) / 2, cy = (w.bbox[1] + w.bbox[3]) / 2;
+      const vote = {};
+      for (const o of words) {
+        if (o === w) continue;
+        const d = Math.hypot((o.bbox[0] + o.bbox[2]) / 2 - cx, (o.bbox[1] + o.bbox[3]) / 2 - cy);
+        if (d < 18) vote[o.rot] = (vote[o.rot] || 0) + (o.members.length > 1 ? 2 : 1) / (1 + d / 6);
+      }
+      const ks = Object.keys(vote); if (!ks.length) continue;
+      const ctx = +ks.reduce((a, b) => (vote[a] >= vote[b] ? a : b));
+      if (ctx === w.rot || !c.best[ctx]) continue;
+      if (c.best[ctx][1] >= c.best[w.rot][1] - 0.08 && c.best[ctx][1] >= 0.8) { w.rot = ctx; w.text = c.best[ctx][0]; w.H = H(c, ctx); }
     }
     // '-' prefixes and '.' separators
     for (const it of items) {
