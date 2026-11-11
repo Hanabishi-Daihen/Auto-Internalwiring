@@ -53,51 +53,55 @@
     const date = new Date();
     const dstr = `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${date.getFullYear()}`;
     const loc = m.loc || 'TCC.';
-    const sheetName = ('IN ' + loc.replace(/\.$/, '')).slice(0, 31);
-
-    // ------------------------------------------------ main wiring sheet
-    const ws = wb.addWorksheet(sheetName, { views: [{ state: 'frozen', ySplit: 2 }] });
+    const allLocs = Array.from(new Set(wires.map((w) => w.loc || loc))).sort();
+    const multi = allLocs.length > 1;
     const heads = ['WIRE MARK 1', 'WIRE MARK 2', 'LINENO.', 'CABLE DETAILS', 'LOC.1', 'CMP.1', 'PIN.1', 'LOC.2', 'CMP.2', 'PIN.2', 'SH.', 'LENGTH (mm)', 'CUT (mm)', 'ROUTE', 'REMARK'];
     const widths = [12.28, 13, 6.99, 14.56, 9.14, 7.85, 6.56, 8.7, 6.7, 5.99, 7.42, 9, 8, 18, 40];
-    widths.forEach((w, i) => { ws.getColumn(i + 1).width = w; });
-    titleRow(ws, `${m.title} ${dstr} Rev.${m.rev}`, heads.length);
-    headerRow(ws, heads);
-    const H = hf(m, `Internal wiring diagram ${loc.replace(/\.$/, '')} ${m.processNo}`);
-    ws.headerFooter.oddHeader = H.oddHeader;
-    ws.headerFooter.oddFooter = H.oddFooter;
-    pageSetup(ws, false);
+    const sorted = opt.sortedWires(opt.sort || 'sheet');
 
-    const list = opt.sortedWires(opt.sort || 'sheet');
-    let r = 3, lastKey = null;
-    list.forEach((w) => {
-      const key = opt.sort === 'work' ? w.bundle : opt.sort === 'sheet' || !opt.sort ? w.sheet : null;
-      if (lastKey !== null && key !== lastKey) r++;          // blank row between sheets / bundles
-      lastKey = key;
-      const row = ws.getRow(r);
-      const cab = opt.cableText(w.cls);
-      const p1 = isNaN(+w.pin1) || w.pin1 === '' ? w.pin1 : w.pin1;
-      const vals = [null, null, w.wire, cab, loc, w.cmp1, p1, loc, w.cmp2, w.pin2, isNaN(+w.sheet) ? w.sheet : +w.sheet,
-        Math.round(w.len), w.cut, (w.via || []).join(' > '), w.remark];
-      vals.forEach((v, i) => { if (v !== null) row.getCell(i + 1).value = v; });
-      const m1 = `${w.cmp1}.${w.pin1}\n${w.cmp2}.${w.pin2}`, m2 = `${w.cmp2}.${w.pin2}\n${w.cmp1}.${w.pin1}`;
-      row.getCell(1).value = { formula: `CONCATENATE(F${r}&"."&G${r},CHAR(10),I${r}&"."&J${r})`, result: m1 };
-      row.getCell(2).value = { formula: `CONCATENATE(I${r}&"."&J${r},CHAR(10),F${r}&"."&G${r})`, result: m2 };
-      for (let c = 1; c <= heads.length; c++) {
-        const cell = row.getCell(c);
-        cell.border = BORDER;
-        if (c <= 2) { cell.font = FONT_MARK; cell.alignment = { horizontal: 'left', vertical: 'bottom', wrapText: true }; }
-        else { cell.font = FONT_DATA; cell.alignment = { horizontal: c >= 14 ? 'left' : 'center', vertical: 'bottom', wrapText: c >= 14 }; }
-        if ([3, 6, 7, 9, 10].indexOf(c) >= 0) cell.numFmt = '@';
-      }
-      if (!cab) row.getCell(4).fill = FILL(YELLOW);
-      if (w.remark) row.getCell(15).fill = FILL(ORANGE);
-      row.height = 30;
-      r++;
+    // ------------------------------------------------ one wiring sheet per cabinet (IN LCC, IN RCC, ...)
+    allLocs.forEach((L) => {
+      const short = L.replace(/\.$/, '');
+      const ws = wb.addWorksheet(('IN ' + short).slice(0, 31), { views: [{ state: 'frozen', ySplit: 2 }] });
+      widths.forEach((w, i) => { ws.getColumn(i + 1).width = w; });
+      const title = multi ? `${short} INTERNAL CABLE WIRING ${m.processNo}` : m.title;
+      titleRow(ws, `${title} ${dstr} Rev.${m.rev}`, heads.length);
+      headerRow(ws, heads);
+      const H = hf(m, `Internal wiring diagram ${short} ${m.processNo}`);
+      ws.headerFooter.oddHeader = H.oddHeader;
+      ws.headerFooter.oddFooter = H.oddFooter;
+      pageSetup(ws, false);
+
+      let r = 3, lastKey = null;
+      sorted.filter((w) => (w.loc || loc) === L).forEach((w) => {
+        const key = opt.sort === 'work' ? w.bundle : opt.sort === 'sheet' || !opt.sort ? w.sheet : null;
+        if (lastKey !== null && key !== lastKey) r++;          // blank row between sheets / bundles
+        lastKey = key;
+        const row = ws.getRow(r);
+        const cab = opt.cableText(w.cls);
+        const vals = [null, null, w.wire, cab, L, w.cmp1, w.pin1, L, w.cmp2, w.pin2, isNaN(+w.sheet) || w.sheet === '' ? w.sheet : +w.sheet,
+          isFinite(w.len) ? Math.round(w.len) : '', w.cut || '', (w.via || []).join(' > '), w.remark];
+        vals.forEach((v, i) => { if (v !== null) row.getCell(i + 1).value = v; });
+        const m1 = `${w.cmp1}.${w.pin1}\n${w.cmp2}.${w.pin2}`, m2 = `${w.cmp2}.${w.pin2}\n${w.cmp1}.${w.pin1}`;
+        row.getCell(1).value = { formula: `CONCATENATE(F${r}&"."&G${r},CHAR(10),I${r}&"."&J${r})`, result: m1 };
+        row.getCell(2).value = { formula: `CONCATENATE(I${r}&"."&J${r},CHAR(10),F${r}&"."&G${r})`, result: m2 };
+        for (let c = 1; c <= heads.length; c++) {
+          const cell = row.getCell(c);
+          cell.border = BORDER;
+          if (c <= 2) { cell.font = FONT_MARK; cell.alignment = { horizontal: 'left', vertical: 'bottom', wrapText: true }; }
+          else { cell.font = FONT_DATA; cell.alignment = { horizontal: c >= 14 ? 'left' : 'center', vertical: 'bottom', wrapText: c >= 14 }; }
+          if ([3, 6, 7, 9, 10].indexOf(c) >= 0) cell.numFmt = '@';
+        }
+        if (!cab) row.getCell(4).fill = FILL(YELLOW);
+        if (w.remark) row.getCell(15).fill = FILL(ORANGE);
+        row.height = 30;
+        r++;
+      });
     });
 
     // ------------------------------------------------ short link sheet
     const sl = wb.addWorksheet('SHORT LINK (TB)');
-    titleRow(sl, `${loc} SHORT LINK TERMINAL (BAR) — ${m.processNo}`, 5);
+    titleRow(sl, `${allLocs.join(' / ')} SHORT LINK TERMINAL (BAR) — ${m.processNo}`, 5);
     headerRow(sl, ['TERMINAL', 'FROM', 'TO', 'POINTS', 'PINS IN GROUP']);
     [12, 10, 10, 9, 60].forEach((w, i) => { sl.getColumn(i + 1).width = w; });
     let sr = 3;
@@ -114,13 +118,13 @@
 
     // ------------------------------------------------ bundle sheet
     const bs = wb.addWorksheet('BUNDLE');
-    titleRow(bs, `${loc} WIRE BUNDLES BY ROUTE — ${m.processNo}`, 5);
+    titleRow(bs, `${allLocs.join(' / ')} WIRE BUNDLES BY ROUTE — ${m.processNo}`, 5);
     headerRow(bs, ['BUNDLE (FROM ↔ TO)', 'WIRES', 'ROUTED LENGTH (m)', 'CUT LENGTH (m)', 'VIA']);
     [34, 9, 16, 15, 50].forEach((w, i) => { bs.getColumn(i + 1).width = w; });
     const b = {};
     wires.forEach((w) => {
       const k = w.bundle; b[k] = b[k] || { n: 0, len: 0, cut: 0, via: {} };
-      b[k].n++; b[k].len += w.len; b[k].cut += w.cut;
+      b[k].n++; b[k].len += isFinite(w.len) ? w.len : 0; b[k].cut += w.cut;
       (w.via || []).forEach((v) => { b[k].via[v] = 1; });
     });
     let br = 3;
@@ -134,7 +138,7 @@
 
     // ------------------------------------------------ cut list / material
     const cs = wb.addWorksheet('CUT LIST');
-    titleRow(cs, `${loc} CABLE MATERIAL SUMMARY — ${m.processNo}`, 5);
+    titleRow(cs, `${allLocs.join(' / ')} CABLE MATERIAL SUMMARY — ${m.processNo}`, 5);
     headerRow(cs, ['CABLE DETAILS', 'CIRCUIT', 'WIRES', 'CUT LENGTH TOTAL (m)', 'NOTE']);
     [18, 30, 9, 20, 40].forEach((w, i) => { cs.getColumn(i + 1).width = w; });
     const mat = {};
@@ -166,7 +170,7 @@
     const lines = [
       ['h', `${m.panelName} — INTERNAL WIRING NOTES (${m.processNo})`],
       ['h', 'ขอบเขต'],
-      ['', `อ่านจาก Schematic ${m.schematicDwg} Sheet ${m.sheets}: สายอุปกรณ์→อุปกรณ์ และอุปกรณ์→Terminal ภายในตู้ (${loc}) รวม ${wires.length} เส้น จาก ${project.nets.length} node`],
+      ['', `อ่านจาก Schematic ${m.schematicDwg} Sheet ${m.sheets}: สายอุปกรณ์→อุปกรณ์ และอุปกรณ์→Terminal ภายในตู้ (${allLocs.join(", ")}) รวม ${wires.length} เส้น จาก ${project.nets.length} node`],
       ['', 'ไม่รวมสายจาก Terminal ไปอุปกรณ์ภายนอก (หม้อแปลง, Sensor, ลูกค้า) ตาม Terminal arrangement Sheet 23-28'],
       ...Object.values(project.noInternal || {}).map((t) => ['', t]),
       ['h', 'วิธีจัดลำดับการพ่วงสาย'],

@@ -55,7 +55,7 @@
     function pinPos(ref) {
       const sp = splitPin(ref);
       const d = devices[sp.dev];
-      if (!d) return null;
+      if (!d || !d.view || !views[d.view]) return null;
       const view = views[d.view];
       let x = d.x, y = d.y;
       const t = terms[sp.dev];
@@ -69,11 +69,11 @@
       return { view: d.view, x: x, y: y, X: w.X, Y: w.Y, Z: w.Z };
     }
 
-    // ---- wireway graph (plate) ----
-    const plate = views.PLATE;
-    const segs = project.wireways.map(function (w) {
-      return { id: w[0], x1: w[1], y1: w[2], x2: w[3], y2: w[4], pts: [] };
-    });
+    // ---- wireway graph (one per 'graph' view, e.g. mounting plates of LCC / RCC) ----
+    const firstGraph = Object.keys(views).find(function (k) { return views[k].kind === 'graph'; }) || 'PLATE';
+    const segs = (project.wireways || []).map(function (w) {
+      return { id: w[0], x1: w[1], y1: w[2], x2: w[3], y2: w[4], view: w[5] || firstGraph, pts: [] };
+    }).filter(function (s) { return !!views[s.view]; });
     const nodes = [];                  // {id, view, x, y, X, Y, Z, label}
     const nodeKey = {};
     function addNode(view, x, y, label) {
@@ -84,46 +84,63 @@
       nodeKey[k] = nodes.length - 1;
       return nodes.length - 1;
     }
-    function onSeg(s, x, y) {
+    function onSeg(s, x, y, view) {
       const tol = 0.6;
+      if (view && s.view !== view) return false;
       if (Math.abs(s.y1 - s.y2) < 1e-6) {           // horizontal
         return Math.abs(y - s.y1) < tol && x >= Math.min(s.x1, s.x2) - tol && x <= Math.max(s.x1, s.x2) + tol;
       }
       return Math.abs(x - s.x1) < tol && y >= Math.min(s.y1, s.y2) - tol && y <= Math.max(s.y1, s.y2) + tol;
     }
     segs.forEach(function (s) {
-      s.pts.push(addNode('PLATE', s.x1, s.y1));
-      s.pts.push(addNode('PLATE', s.x2, s.y2));
+      s.pts.push(addNode(s.view, s.x1, s.y1));
+      s.pts.push(addNode(s.view, s.x2, s.y2));
     });
     // intersections
     for (let i = 0; i < segs.length; i++) {
       for (let j = 0; j < segs.length; j++) {
         if (i === j) continue;
         const a = segs[i], b = segs[j];
+        if (a.view !== b.view) continue;
         const aH = Math.abs(a.y1 - a.y2) < 1e-6, bH = Math.abs(b.y1 - b.y2) < 1e-6;
         if (aH === bH) continue;
         const x = aH ? b.x1 : a.x1, y = aH ? a.y1 : b.y1;
         if (onSeg(a, x, y) && onSeg(b, x, y)) {
           const xx = aH ? x : a.x1, yy = aH ? a.y1 : y;
-          const n = addNode('PLATE', xx, yy);
+          const n = addNode(a.view, xx, yy);
           if (a.pts.indexOf(n) < 0) a.pts.push(n);
         }
       }
     }
-    // portals: plate end is inserted on its segment
-    const portals = (project.portals || []).map(function (p) {
-      const anchor = addNode(p[1], p[2], p[3], p[0]);
-      let plateNode = null;
-      segs.forEach(function (s) {
-        if (plateNode === null && onSeg(s, p[4], p[5])) {
-          const xx = Math.abs(s.y1 - s.y2) < 1e-6 ? p[4] : s.x1;
-          const yy = Math.abs(s.y1 - s.y2) < 1e-6 ? s.y1 : p[5];
-          plateNode = addNode('PLATE', xx, yy, p[0]);
-          if (s.pts.indexOf(plateNode) < 0) s.pts.push(plateNode);
+    // portals (links between views): [id, viewA, xA, yA, xB, yB, extra_mm, viewB, fixedCost]
+    // e.g. door hinge bundle -> plate wireway, side-wall wireway -> inner-panel wireway.
+    // An end that lies in a 'graph' view is inserted on its wireway segment.
+    function attachPoint(view, x, y, label) {
+      let node = null;
+      if (views[view].kind === 'graph') {
+        let best = null, bd = Infinity;
+        segs.forEach(function (s) {
+          if (s.view !== view) return;
+          const H = Math.abs(s.y1 - s.y2) < 1e-6;
+          const px = H ? Math.min(Math.max(x, Math.min(s.x1, s.x2)), Math.max(s.x1, s.x2)) : s.x1;
+          const py = H ? s.y1 : Math.min(Math.max(y, Math.min(s.y1, s.y2)), Math.max(s.y1, s.y2));
+          const d = Math.abs(px - x) + Math.abs(py - y);
+          if (d < bd) { bd = d; best = { s: s, x: px, y: py }; }
+        });
+        if (best && bd < 12) {
+          node = addNode(view, best.x, best.y, label);
+          if (best.s.pts.indexOf(node) < 0) best.s.pts.push(node);
         }
-      });
-      if (plateNode === null) plateNode = addNode('PLATE', p[4], p[5], p[0]);
-      return { id: p[0], view: p[1], anchor: anchor, plate: plateNode, extra: p[6] || 0 };
+      }
+      return node === null ? addNode(view, x, y, label) : node;
+    }
+    const portals = (project.portals || []).filter(function (p) {
+      return views[p[1]] && views[p[7] || firstGraph];
+    }).map(function (p) {
+      const vb = p[7] || firstGraph;
+      const anchor = attachPoint(p[1], p[2], p[3], p[0]);
+      const plateNode = attachPoint(vb, p[4], p[5], p[0]);
+      return { id: p[0], view: p[1], viewB: vb, anchor: anchor, plate: plateNode, extra: p[6] || 0, fixed: !!p[8] };
     });
     // edges
     const N = nodes.length;
@@ -139,7 +156,10 @@
       }
     });
     portals.forEach(function (p) {
-      edges.push({ a: p.anchor, b: p.plate, w: manhattan(nodes[p.anchor], nodes[p.plate]) + p.extra, seg: p.id, portal: true });
+      // fixed-cost portals (drawn in the app on views with independent scales): extra + height difference
+      const w = p.fixed ? p.extra + Math.abs(nodes[p.anchor].Y - nodes[p.plate].Y)
+        : manhattan(nodes[p.anchor], nodes[p.plate]) + p.extra;
+      edges.push({ a: p.anchor, b: p.plate, w: w, seg: p.id, portal: true });
     });
     // Floyd-Warshall
     const D = [], NX = [], ES = [];
@@ -179,14 +199,15 @@
     const p = model.pinPos(ref);
     let opts = [];
     if (!p) { model._attach[ref] = opts; return opts; }
-    if (p.view === 'PLATE') {
+    if (model.views[p.view].kind === 'graph') {
       const cand = [];
       model.segs.forEach(function (s) {
+        if (s.view !== p.view) return;
         const H = Math.abs(s.y1 - s.y2) < 1e-6;
         let px, py;
         if (H) { px = Math.min(Math.max(p.x, Math.min(s.x1, s.x2)), Math.max(s.x1, s.x2)); py = s.y1; }
         else { px = s.x1; py = Math.min(Math.max(p.y, Math.min(s.y1, s.y2)), Math.max(s.y1, s.y2)); }
-        const w = toWorld(model.views.PLATE, px, py);
+        const w = toWorld(model.views[p.view], px, py);
         const stub = Math.abs(w.X - p.X) + Math.abs(w.Y - p.Y);
         cand.push({ s: s, px: px, py: py, w: w, stub: stub, H: H });
       });
@@ -209,9 +230,10 @@
       });
     } else {
       model.portals.forEach(function (pt) {
-        if (pt.view !== p.view) return;
-        const a = model.nodes[pt.anchor];
-        opts.push({ n: pt.anchor, c: manhattan(p, a), proj: null, seg: null, sub: null });
+        const n = pt.view === p.view ? pt.anchor : pt.viewB === p.view ? pt.plate : -1;
+        if (n < 0) return;
+        const a = model.nodes[n];
+        opts.push({ n: n, c: manhattan(p, a), proj: null, seg: null, sub: null });
       });
     }
     model._attach[ref] = opts;
@@ -222,8 +244,13 @@
   function route(model, refA, refB) {
     const pa = model.pinPos(refA), pb = model.pinPos(refB);
     if (!pa || !pb) return { len: Infinity, nodes: [], via: [], direct: false };
+    // two terminals of the same device: short jumper on the device itself
+    if (splitPin(refA).dev === splitPin(refB).dev && refA !== 'GND') {
+      const j = (model.project.settings && model.project.settings.jumper) || 50;
+      return { len: j, nodes: [], via: ['JUMPER'], direct: true, from: pa, to: pb };
+    }
     let best = { len: Infinity, nodes: [], via: [], direct: false };
-    if (pa.view === pb.view && pa.view !== 'PLATE') {
+    if (pa.view === pb.view && (model.views[pa.view].kind !== 'graph' || !attachOptions(model, refA).length)) {
       best = { len: manhattan(pa, pb), nodes: [], via: [pa.view], direct: true };
     }
     const oa = attachOptions(model, refA), ob = attachOptions(model, refB);
@@ -262,11 +289,25 @@
     return best;
   }
 
+  // pins without a position or without a route get a large finite cost so a chain is still produced
+  const NO_ROUTE = 1e7;
   function distance(model, a, b) {
     const k = a < b ? a + '|' + b : b + '|' + a;
     const c = model._dist || (model._dist = {});
-    if (c[k] === undefined) c[k] = route(model, a, b).len;
+    if (c[k] === undefined) { const L = route(model, a, b).len; c[k] = isFinite(L) ? L : NO_ROUTE; }
     return c[k];
+  }
+
+  // cabinet (LOC) of a pin: device.loc, else its view's loc, else the project LOC
+  function locOf(model, ref) {
+    const sp = splitPin(ref);
+    const d = model.project.devices[sp.dev];
+    if (d && d.loc) return d.loc;
+    const pre = sp.dev.match(/^\+([A-Za-z0-9]+)-/);      // +RCC-X3 -> RCC.
+    if (pre) return pre[1].toUpperCase() + '.';
+    if (!d) return model.project.meta.loc || '';
+    const v = model.views[d.view];
+    return (v && v.loc) || model.project.meta.loc || '';
   }
 
   // ------------------------------------------------------------------ path optimisation
@@ -368,6 +409,33 @@
    *   returns {segments:[{a,b,sheet,len,route,fixed}], lenDrawing, lenOpt, warnings:[]}
    */
   function planNet(model, net, opts) {
+    // a node drawn across two cabinets (e.g. LCC-X3.201 ... RCC-X3.201) is joined by an external cable:
+    // plan the internal wiring of each cabinet separately
+    const groups = {};
+    net.pins.forEach(function (p) {
+      const r = Array.isArray(p) ? p[0] : p;
+      const L = locOf(model, r);
+      (groups[L] = groups[L] || []).push(p);
+    });
+    const locs = Object.keys(groups);
+    if (locs.length <= 1) return planCabinet(model, net, opts);
+    const res = { segments: [], lenDrawing: 0, lenOpt: 0, warnings: [], unrouted: 0, cabinets: locs };
+    locs.forEach(function (L) {
+      const refs = groups[L].map(function (p) { return Array.isArray(p) ? p[0] : p; });
+      const sub = Object.assign({}, net, {
+        pins: groups[L],
+        fixed: (net.fixed || []).filter(function (f) { return refs.indexOf(f[0]) >= 0 && refs.indexOf(f[1]) >= 0; })
+      });
+      const r = planCabinet(model, sub, opts);
+      res.segments = res.segments.concat(r.segments);
+      res.lenDrawing += r.lenDrawing; res.lenOpt += r.lenOpt; res.unrouted += r.unrouted;
+      res.warnings = res.warnings.concat(r.warnings);
+    });
+    res.warnings.push('node นี้อยู่หลายตู้ (' + locs.join(', ') + ') — ส่วนที่ข้ามตู้เป็นสายภายนอก');
+    return res;
+  }
+
+  function planCabinet(model, net, opts) {
     opts = opts || {};
     const warnings = [];
     const sheetOf = {};
@@ -391,7 +459,7 @@
     const leaf = {};
     (net.fixed || []).forEach(function (f) {
       const a = f[0], b = f[1];
-      const aT = !!model.project.terminals[splitPin(a).dev];
+      const aT = !!(model.project.terminals || {})[splitPin(a).dev];
       const lf = aT ? b : a, anchor = aT ? a : b;
       leaf[lf] = anchor;
       fixedSegs.push({ a: anchor, b: lf, fixed: true });
@@ -502,27 +570,33 @@
     });
     const fixedLen = all.filter(function (x) { return x.fixed; }).reduce(function (s, x) { return s + x.len; }, 0);
     const lenDrawing = chainLen(merged) + fixedLen;
-    const lenOpt = out.reduce(function (s, x) { return s + x.len; }, 0);
-    return { segments: out, lenDrawing: lenDrawing, lenOpt: lenOpt, warnings: warnings };
+    const lenOpt = out.reduce(function (s, x) { return s + (isFinite(x.len) ? x.len : 0); }, 0);
+    const unrouted = out.filter(function (x) { return !isFinite(x.len); }).length;
+    return { segments: out, lenDrawing: Math.min(lenDrawing, NO_ROUTE) >= NO_ROUTE ? lenOpt : lenDrawing, lenOpt: lenOpt, warnings: warnings, unrouted: unrouted };
   }
 
   // zone of a pin for bundling / work order
   function zoneOf(model, ref) {
     const p = model.pinPos(ref);
     if (!p) return '?';
-    if (p.view !== 'PLATE') return p.view;
+    const multi = Object.keys(model.views).some(function (k) { return model.views[k].loc; });
+    const pre = multi ? locOf(model, ref).replace(/\.$/, '') + ' ' : '';
+    const v = model.views[p.view];
+    if (v.kind !== 'graph') return pre + p.view;
     const dev = splitPin(ref).dev;
-    if (model.project.terminals[dev]) return 'PLATE-TB';
-    if (dev === 'GND') return 'PLATE-GND';
-    if (p.y < 190) return 'PLATE-R1';
-    if (p.y < 220) return 'PLATE-R2';
-    return 'PLATE-R3';
+    if ((model.project.terminals || {})[dev] || /(^|-)(TB|X)\d|TB-?X/i.test(dev)) return pre + p.view + '-TB';
+    if (dev === 'GND') return pre + p.view + '-GND';
+    const rows = (model.project.zoneRows || {})[p.view];
+    if (rows) {
+      for (let i = 0; i < rows.length; i++) if (p.y < rows[i][0]) return pre + p.view + '-' + rows[i][1];
+    }
+    return pre + p.view;
   }
 
   const api = {
     splitPin: splitPin, pinLabel: pinLabel, pinNote: pinNote, toWorld: toWorld,
     buildModel: buildModel, route: route, distance: distance, planNet: planNet,
-    attachOptions: attachOptions, zoneOf: zoneOf, exactPath: exactPath, heuristicPath: heuristicPath
+    attachOptions: attachOptions, zoneOf: zoneOf, locOf: locOf, exactPath: exactPath, heuristicPath: heuristicPath
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.WiringEngine = api;

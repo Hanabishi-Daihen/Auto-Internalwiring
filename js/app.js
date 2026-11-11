@@ -7,28 +7,57 @@
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const clone = (o) => JSON.parse(JSON.stringify(o));
   const fmtM = (mm) => (mm / 1000).toFixed(1) + ' m';
+  const fin = (v) => (isFinite(v) ? v : 0);
 
   const BASE = clone(window.PROJECT_DATA);
-  const STORE_KEY = 'iwp.project.' + (BASE.meta.processNo || 'default');
-  const DEFAULT_SETTINGS = { mode: 'opt', allow: 100, round: 50 };
+  const STORE_KEY = 'iwp.project.current';
+  const DEFAULT_SETTINGS = { mode: 'opt', allow: 100, round: 50, jumper: 50 };
+
+  // generic circuit classes for a new project (edit to match the "Cable for wiring" table of the drawing)
+  const NEW_CABLE = {
+    AC_PH_A: { label: 'AC power phase A', color: 'R', size: '4.0' },
+    AC_PH_B: { label: 'AC power phase B', color: 'Y', size: '4.0' },
+    AC_PH_C: { label: 'AC power phase C', color: 'B', size: '4.0' },
+    AC_PH_N: { label: 'AC power neutral', color: '', size: '4.0' },
+    AC_CTRL: { label: 'AC control circuit', color: '', size: '2.5' },
+    DC_CTRL: { label: 'DC control circuit', color: '', size: '2.5' },
+    DC_PWR: { label: 'DC power source line', color: '', size: '4.0' },
+    CT: { label: 'CT circuit', color: '', size: '4.0' },
+    VT: { label: 'PT / VT circuit', color: '', size: '4.0' },
+    EARTH: { label: 'Connection to earth', color: 'GY', size: '2.5' },
+    '': { label: 'ไม่ระบุ (ตรวจสอบ)', color: '', size: '' }
+  };
 
   let project, model, plan, wires;
-  let selWire = null, selNet = '', selDev = null;
-  let bgImage = null;
-  let pdfDoc = null, pdfPage = 1, pdfZoom = 1.4;
+  let selWire = null, selDev = null;
+  const bgImages = {};
+  let pdfDoc = null, pdfName = '', pdfPage = 1, pdfZoom = 1.4;
 
-  // ---------------------------------------------------------------- storage
+  // ---------------------------------------------------------------- storage / migration
+  function migrate(p) {
+    p.settings = Object.assign({}, DEFAULT_SETTINGS, p.settings || {});
+    p.views = p.views || {}; p.devices = p.devices || {}; p.nets = p.nets || [];
+    p.wireways = p.wireways || []; p.portals = p.portals || [];
+    p.terminals = p.terminals || {}; p.bars = p.bars || {}; p.cable = p.cable || clone(NEW_CABLE);
+    if (!p.backgrounds) {
+      p.backgrounds = {};
+      if (p.background) p.backgrounds.main = Object.assign({ name: 'Outline Sheet ' + (p.meta.outlineSheet || '') }, p.background);
+      delete p.background;
+    }
+    Object.values(p.views).forEach((v) => { if (!v.bg) v.bg = Object.keys(p.backgrounds)[0] || 'main'; });
+    return p;
+  }
   function load() {
     let saved = null;
     try { saved = JSON.parse(localStorage.getItem(STORE_KEY) || 'null'); } catch (e) { saved = null; }
-    project = saved && saved.version === BASE.version ? saved : clone(BASE);
-    project.settings = Object.assign({}, DEFAULT_SETTINGS, project.settings || {});
+    project = migrate(saved && saved.version === BASE.version && saved.nets ? saved : clone(BASE));
   }
   let saveTimer = null;
   function save() {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
-      try { localStorage.setItem(STORE_KEY, JSON.stringify(project)); } catch (e) { /* storage unavailable */ }
+      try { localStorage.setItem(STORE_KEY, JSON.stringify(project)); }
+      catch (e) { toast('บันทึกในเบราว์เซอร์ไม่ได้ (พื้นที่เต็ม) — ใช้ 💾 บันทึกโปรเจกต์ เป็นไฟล์แทน', 6000); }
     }, 300);
   }
   function toast(msg, ms) {
@@ -37,6 +66,11 @@
     clearTimeout(toast._t);
     toast._t = setTimeout(() => { t.hidden = true; }, ms || 3200);
   }
+  const locs = () => Array.from(new Set((wires || []).map((w) => w.loc).filter(Boolean)
+    .concat(Object.values(project.views).map((v) => v.loc).filter(Boolean)))).sort();
+  // '+RCC-X3' -> '-X3' (the LOC column carries the cabinet)
+  const cmpName = (dev) => dev.replace(/^\+[A-Za-z0-9]+(?=-)/, '');
+  const bgOfDev = (d) => (d.view && project.views[d.view] ? project.views[d.view].bg : d.bg);
 
   // ---------------------------------------------------------------- compute
   function recompute() {
@@ -50,12 +84,14 @@
         const notes = [];
         [pa, pb].forEach((p) => { const n = E.pinNote(p.pin); if (n) notes.push(E.pinLabel(p.pin) + ' = ' + n); });
         if (s.fixed) notes.push('ช่วงล็อกตามแบบ');
+        if (!isFinite(s.len)) notes.push('ยังไม่มีตำแหน่ง/เส้นทาง — วางอุปกรณ์ในผังก่อน');
         if (net.remark) notes.push(net.remark);
-        const cut = Math.ceil((s.len + 2 * st.allow) / st.round) * st.round;
+        const cut = isFinite(s.len) ? Math.ceil((s.len + 2 * st.allow) / st.round) * st.round : 0;
         wires.push({
           net: ni, wire: net.wire, cls: net.cls || '', sheet: s.sheet, a: s.a, b: s.b,
-          cmp1: pa.dev, pin1: E.pinLabel(pa.pin), cmp2: pb.dev, pin2: E.pinLabel(pb.pin),
-          len: s.len, cut: isFinite(cut) ? cut : 0, via: s.via, route: s.route, fixed: s.fixed,
+          loc: E.locOf(model, s.a),
+          cmp1: cmpName(pa.dev), pin1: E.pinLabel(pa.pin), cmp2: cmpName(pb.dev), pin2: E.pinLabel(pb.pin),
+          len: s.len, cut: cut, via: s.via, route: s.route, fixed: s.fixed,
           z1: E.zoneOf(model, s.a), z2: E.zoneOf(model, s.b), remark: notes.join(' / ')
         });
       });
@@ -71,28 +107,32 @@
   // ---------------------------------------------------------------- overview
   function renderOverview() {
     const m = project.meta;
-    $('#projTitle').textContent = `${m.processNo} · ${m.panelName} · Schematic ${m.schematicDwg} Sheet ${m.sheets}`;
+    $('#projTitle').textContent = `${m.processNo || ''} · ${m.panelName || ''} · Schematic ${m.schematicDwg || '-'} Sheet ${m.sheets || '-'}`;
     const totOpt = plan.reduce((s, r) => s + r.lenOpt, 0);
     const totDraw = plan.reduce((s, r) => s + r.lenDrawing, 0);
     const blank = wires.filter((w) => !cableText(w.cls)).length;
-    const doorW = wires.filter((w) => /DOOR/.test(w.z1 + w.z2) && !(/DOOR/.test(w.z1) && /DOOR/.test(w.z2) && w.z1 === w.z2)).length;
+    const doorW = wires.filter((w) => /DOOR|HINGE/.test((w.via || []).join(' '))).length;
     const assumed = Object.values(project.devices).filter((d) => d.assumed).length;
+    const unplaced = Object.values(project.devices).filter((d) => !d.view || !project.views[d.view]).length;
+    const unrouted = wires.filter((w) => !isFinite(w.len)).length;
+    const cross = plan.filter((r) => r.cabinets).length;
     const over = pinOverload();
     const saving = totDraw > 0 ? (1 - totOpt / totDraw) * 100 : 0;
+    const L = locs();
     const cards = [
-      ['จำนวนสายภายใน', wires.length, `${project.nets.length} node จาก Sheet ${m.sheets}`, ''],
+      ['จำนวนสายภายใน', wires.length, `${project.nets.length} node${L.length > 1 ? ' · ' + L.length + ' ตู้ (' + L.join(', ') + ')' : ''}`, ''],
       ['ความยาวรวม (โดยประมาณ)', fmtM(totOpt), project.settings.mode === 'opt' ? `ตามแบบ ${fmtM(totDraw)} · ลดลง ${saving.toFixed(0)}%` : 'ใช้ลำดับตามแบบ', 'good'],
       ['ใส่สี/ขนาดสายแล้ว', wires.length - blank, `ยังว่าง ${blank} เส้น (ระบายเหลือง)`, blank ? 'warn' : 'good'],
-      ['สายข้ามประตู (hinge)', doorW, 'มัดรวมผ่านบานพับ', ''],
-      ['อุปกรณ์ตำแหน่งสมมติ', assumed, 'ไม่พบใน Outline — ควรตรวจ', assumed ? 'warn' : 'good'],
+      ['สายผ่านบานพับ (hinge)', doorW, 'มัดรวมผ่านบานพับ', ''],
+      ['อุปกรณ์ตำแหน่งสมมติ / ยังไม่วาง', assumed + ' / ' + unplaced, unrouted ? `${unrouted} เส้นยังไม่มีเส้นทาง` : 'ทุกเส้นมีเส้นทาง', assumed + unplaced ? 'warn' : 'good'],
       ['ขั้วที่มีสาย > 2 เส้น', over.length, over.length ? over.slice(0, 3).map((o) => o[0]).join(', ') : 'ผ่าน', over.length ? 'warn' : 'good']
     ];
+    if (cross) cards.push(['node ที่ข้ามตู้', cross, 'แยกวางแผนเป็นสายภายในแต่ละตู้', '']);
     $('#statCards').innerHTML = cards.map((c) => `<div class="card ${c[3]}"><div class="k">${esc(c[0])}</div><div class="v">${esc(c[1])}</div><div class="s">${esc(c[2])}</div></div>`).join('');
     const an = (project.anomalies || []).concat(Object.values(project.noInternal || {}));
-    $('#anomalyList').innerHTML = an.map((a) => `<li>${esc(a)}</li>`).join('');
-    // bundle table
+    $('#anomalyList').innerHTML = an.length ? an.map((a) => `<li>${esc(a)}</li>`).join('') : '<li style="color:var(--muted)">ยังไม่มีบันทึก</li>';
     const b = {};
-    wires.forEach((w) => { const k = w.bundle; (b[k] = b[k] || { n: 0, len: 0, cut: 0 }); b[k].n++; b[k].len += w.len; b[k].cut += w.cut; });
+    wires.forEach((w) => { const k = w.bundle; (b[k] = b[k] || { n: 0, len: 0, cut: 0 }); b[k].n++; b[k].len += fin(w.len); b[k].cut += w.cut; });
     const rows = Object.entries(b).sort((x, y) => y[1].n - x[1].n);
     $('#bundleTable').innerHTML = `<table class="grid"><tr><th>กลุ่มเส้นทาง (ต้นทาง ↔ ปลายทาง)</th><th>จำนวนสาย</th><th>ความยาวเดินสาย</th><th>ความยาวตัดรวม</th></tr>` +
       rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td class="num">${v.n}</td><td class="num">${fmtM(v.len)}</td><td class="num">${fmtM(v.cut)}</td></tr>`).join('') + '</table>';
@@ -114,27 +154,35 @@
     sel.innerHTML = '<option value="">ทุก Sheet</option>' + sheets.map((s) => `<option value="${esc(s)}">Sheet ${esc(s)}</option>`).join('');
     sel.value = cur;
   }
+  function locOptions() {
+    const sel = $('#wLoc'), cur = sel.value;
+    const L = Array.from(new Set(wires.map((w) => w.loc))).sort();
+    sel.innerHTML = '<option value="">ทุกตู้</option>' + L.map((l) => `<option>${esc(l)}</option>`).join('');
+    sel.value = cur;
+    sel.style.display = L.length > 1 ? '' : 'none';
+  }
   function sortedWires(mode) {
     const list = wires.slice();
-    const pos = (ref) => { const p = model.pinPos(ref); return p ? [p.view, p.x, p.y] : ['', 0, 0]; };
+    const pos = (ref) => { const p = model.pinPos(ref); return p ? [p.view, p.x, p.y] : ['~', 0, 0]; };
     if (mode === 'work') {
-      list.sort((a, b) => a.bundle.localeCompare(b.bundle) || a.cmp1.localeCompare(b.cmp1, undefined, { numeric: true }) || a.id - b.id);
+      list.sort((a, b) => a.loc.localeCompare(b.loc) || a.bundle.localeCompare(b.bundle) || a.cmp1.localeCompare(b.cmp1, undefined, { numeric: true }) || a.id - b.id);
     } else if (mode === 'device') {
       list.sort((a, b) => {
         const pa = pos(a.a), pb = pos(b.a);
-        return pa[0].localeCompare(pb[0]) || (pa[2] - pb[2]) || (pa[1] - pb[1]) || a.id - b.id;
+        return a.loc.localeCompare(b.loc) || pa[0].localeCompare(pb[0]) || (pa[2] - pb[2]) || (pa[1] - pb[1]) || a.id - b.id;
       });
     } else {
-      list.sort((a, b) => a.sheet.localeCompare(b.sheet) || a.net - b.net || a.id - b.id);
+      list.sort((a, b) => a.loc.localeCompare(b.loc) || a.sheet.localeCompare(b.sheet, undefined, { numeric: true }) || a.net - b.net || a.id - b.id);
     }
     return list;
   }
   function filteredWires() {
     const q = $('#wSearch').value.trim().toLowerCase();
-    const sh = $('#wSheet').value;
+    const sh = $('#wSheet').value, lc = $('#wLoc').value;
     const onlyBlank = $('#wBlank').checked, onlyRem = $('#wRemark').checked;
     return sortedWires($('#wSort').value).filter((w) => {
       if (sh && w.sheet !== sh) return false;
+      if (lc && w.loc !== lc) return false;
       if (onlyBlank && cableText(w.cls)) return false;
       if (onlyRem && !w.remark) return false;
       if (!q) return true;
@@ -144,20 +192,21 @@
   function renderWires() {
     const list = filteredWires();
     const mode = $('#wSort').value;
+    const multi = locs().length > 1;
     $('#wCount').textContent = `${list.length} / ${wires.length} เส้น`;
-    const head = '<tr><th>#</th><th>LINENO.</th><th>CABLE</th><th>CMP.1</th><th>PIN.1</th><th>CMP.2</th><th>PIN.2</th><th>SH.</th><th>ยาว (mm)</th><th>ตัด (mm)</th><th>เส้นทาง</th><th>หมายเหตุ</th></tr>';
+    const head = `<tr><th>#</th>${multi ? '<th>ตู้</th>' : ''}<th>LINENO.</th><th>CABLE</th><th>CMP.1</th><th>PIN.1</th><th>CMP.2</th><th>PIN.2</th><th>SH.</th><th>ยาว (mm)</th><th>ตัด (mm)</th><th>เส้นทาง</th><th>หมายเหตุ</th></tr>`;
     let last = null, n = 0;
     const rows = list.map((w) => {
       let sep = '';
-      const key = mode === 'work' ? w.bundle : mode === 'sheet' ? 'Sheet ' + w.sheet : null;
-      if (key && key !== last) { sep = `<tr class="sep"><td colspan="12">${esc(key)}</td></tr>`; last = key; }
+      const key = (multi ? w.loc + ' · ' : '') + (mode === 'work' ? w.bundle : mode === 'sheet' ? 'Sheet ' + w.sheet : '');
+      if (key && key !== last) { sep = `<tr class="sep"><td colspan="13">${esc(key)}</td></tr>`; last = key; }
       n++;
       const cab = cableText(w.cls);
       const via = (w.via || []).join(' › ');
-      return sep + `<tr data-id="${w.id}" class="${selWire === w.id ? 'sel' : ''}"><td class="num">${n}</td><td class="mono"><b>${esc(w.wire)}</b></td>` +
+      return sep + `<tr data-id="${w.id}" class="${selWire === w.id ? 'sel' : ''}"><td class="num">${n}</td>${multi ? `<td>${esc(w.loc)}</td>` : ''}<td class="mono"><b>${esc(w.wire)}</b></td>` +
         `<td class="nw ${cab ? '' : 'blank'}">${esc(cab)}</td><td class="mono">${esc(w.cmp1)}</td><td class="mono">${esc(w.pin1)}</td>` +
         `<td class="mono">${esc(w.cmp2)}</td><td class="mono">${esc(w.pin2)}</td><td>${esc(w.sheet)}</td>` +
-        `<td class="num">${Math.round(w.len)}</td><td class="num">${w.cut}</td>` +
+        `<td class="num">${isFinite(w.len) ? Math.round(w.len) : '—'}</td><td class="num">${w.cut || '—'}</td>` +
         `<td>${/HINGE/.test(via) ? '<span class="tag door">ผ่านบานพับ</span> ' : ''}${w.fixed ? '<span class="tag fixed">ล็อก</span> ' : ''}<span class="mono">${esc(via)}</span></td>` +
         `<td class="${w.remark ? 'rem' : ''}">${esc(w.remark)}</td></tr>`;
     });
@@ -168,8 +217,9 @@
   function MapView(canvas, opts) {
     this.c = canvas; this.ctx = canvas.getContext('2d');
     this.opts = opts || {};
-    this.scale = 2; this.ox = 0; this.oy = 0;
-    this.highlight = []; this.showAll = false; this.showWW = true; this.edit = false;
+    this.scale = 2; this.ox = 0; this.oy = 0; this.bg = null;
+    this.highlight = []; this.showAll = false; this.showWW = true; this.mode = 'pan';
+    this.temp = null;                  // drawing preview for setup tools
     this.bindEvents();
   }
   MapView.prototype.resize = function () {
@@ -180,48 +230,62 @@
     this.dpr = dpr; this.w = r.width; this.h = r.height;
     return true;
   };
+  MapView.prototype.contentBox = function () {
+    const vs = Object.values(project.views).filter((v) => v.bg === this.bg);
+    if (vs.length) {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      vs.forEach((v) => { x0 = Math.min(x0, v.rect[0]); y0 = Math.min(y0, v.rect[1]); x1 = Math.max(x1, v.rect[2]); y1 = Math.max(y1, v.rect[3]); });
+      const pad = Math.max(8, (x1 - x0) * 0.03);
+      return [x0 - pad, y0 - pad, x1 + pad, y1 + pad];
+    }
+    const b = project.backgrounds[this.bg];
+    return b ? [0, 0, b.ptWidth, b.ptHeight] : [0, 0, 842, 595];
+  };
   MapView.prototype.fit = function (box) {
     if (!this.resize()) return;
-    box = box || [60, 155, 790, 372];
+    box = box || this.contentBox();
     const sx = this.w / (box[2] - box[0]), sy = this.h / (box[3] - box[1]);
     this.scale = Math.min(sx, sy) * 0.98;
     this.ox = (box[0] + box[2]) / 2 - this.w / 2 / this.scale;
     this.oy = (box[1] + box[3]) / 2 - this.h / 2 / this.scale;
     this.draw();
   };
-  MapView.prototype.toScreen = function (x, y) { return [(x - this.ox) * this.scale, (y - this.oy) * this.scale]; };
   MapView.prototype.toPdf = function (sx, sy) { return [sx / this.scale + this.ox, sy / this.scale + this.oy]; };
+  MapView.prototype.evPdf = function (e) {
+    const r = this.c.getBoundingClientRect();
+    const mx = e.clientX - r.left, my = e.clientY - r.top;
+    return { mx: mx, my: my, p: this.toPdf(mx, my) };
+  };
   MapView.prototype.bindEvents = function () {
     const self = this;
     let drag = null;
     this.c.addEventListener('wheel', function (e) {
       e.preventDefault();
-      const r = self.c.getBoundingClientRect();
-      const mx = e.clientX - r.left, my = e.clientY - r.top;
-      const p = self.toPdf(mx, my);
+      const ev = self.evPdf(e);
       const f = e.deltaY < 0 ? 1.15 : 1 / 1.15;
-      self.scale = Math.min(60, Math.max(0.5, self.scale * f));
-      self.ox = p[0] - mx / self.scale; self.oy = p[1] - my / self.scale;
+      self.scale = Math.min(80, Math.max(0.3, self.scale * f));
+      self.ox = ev.p[0] - ev.mx / self.scale; self.oy = ev.p[1] - ev.my / self.scale;
       self.draw();
     }, { passive: false });
     this.c.addEventListener('mousedown', function (e) {
-      const r = self.c.getBoundingClientRect();
-      const mx = e.clientX - r.left, my = e.clientY - r.top;
-      const p = self.toPdf(mx, my);
+      const ev = self.evPdf(e), p = ev.p;
       const hit = self.hitDevice(p[0], p[1]);
-      if (self.edit && hit) { drag = { dev: hit, dx: project.devices[hit].x - p[0], dy: project.devices[hit].y - p[1] }; }
-      else drag = { pan: true, sx: mx, sy: my, ox: self.ox, oy: self.oy, moved: false, hit: hit };
+      const m = self.mode;
+      if (m === 'move' && hit) drag = { dev: hit, dx: project.devices[hit].x - p[0], dy: project.devices[hit].y - p[1] };
+      else if (m === 'view') drag = { rect: true, x0: p[0], y0: p[1] };
+      else drag = { pan: true, sx: ev.mx, sy: ev.my, ox: self.ox, oy: self.oy, moved: false, hit: hit, p: p };
       self.c.style.cursor = 'grabbing';
     });
     window.addEventListener('mousemove', function (e) {
+      const ev = self.evPdf(e), p = ev.p;
+      if (self.temp && self.temp.kind !== 'rect' && !drag) { self.temp.cur = p; self.draw(); }
       if (!drag) return;
-      const r = self.c.getBoundingClientRect();
-      const mx = e.clientX - r.left, my = e.clientY - r.top;
       if (drag.pan) {
-        if (Math.abs(mx - drag.sx) + Math.abs(my - drag.sy) > 3) drag.moved = true;
-        self.ox = drag.ox - (mx - drag.sx) / self.scale; self.oy = drag.oy - (my - drag.sy) / self.scale;
+        if (Math.abs(ev.mx - drag.sx) + Math.abs(ev.my - drag.sy) > 3) drag.moved = true;
+        self.ox = drag.ox - (ev.mx - drag.sx) / self.scale; self.oy = drag.oy - (ev.my - drag.sy) / self.scale;
+      } else if (drag.rect) {
+        self.temp = { kind: 'rect', x0: drag.x0, y0: drag.y0, x1: p[0], y1: p[1] };
       } else {
-        const p = self.toPdf(mx, my);
         const d = project.devices[drag.dev];
         d.x = +(p[0] + drag.dx).toFixed(2); d.y = +(p[1] + drag.dy).toFixed(2);
         drag.moved = true;
@@ -231,30 +295,38 @@
     window.addEventListener('mouseup', function () {
       if (!drag) return;
       self.c.style.cursor = 'grab';
-      if (drag.dev && drag.moved) {
-        const d = project.devices[drag.dev];
-        const v = viewAt(d.x, d.y);
-        if (v) d.view = v;
+      const dr = drag; drag = null;
+      if (dr.dev && dr.moved) {
+        const d = project.devices[dr.dev];
+        const v = viewAt(d.x, d.y, self.bg);
+        d.view = v; d.bg = self.bg;
         d.assumed = false;
         save(); recompute(); refreshAll();
-        toast(`ย้าย ${drag.dev} → ${project.views[d.view].name} แล้วคำนวณเส้นทางใหม่`);
-      } else if (drag.pan && !drag.moved && self.opts.onClick) {
-        self.opts.onClick(drag.hit);
+        toast(v ? `ย้าย ${dr.dev} → ${project.views[v].name}` : `${dr.dev} อยู่นอกมุมมอง — ยังไม่มีเส้นทาง`);
+      } else if (dr.rect && self.temp) {
+        const t = self.temp; self.temp = null; self.draw();
+        if (Math.abs(t.x1 - t.x0) > 4 && Math.abs(t.y1 - t.y0) > 4) self.opts.onRect && self.opts.onRect([Math.min(t.x0, t.x1), Math.min(t.y0, t.y1), Math.max(t.x0, t.x1), Math.max(t.y0, t.y1)]);
+      } else if (dr.pan && !dr.moved && self.opts.onClick) {
+        self.opts.onClick(dr.hit, dr.p);
       }
-      drag = null;
     });
   };
-  function viewAt(x, y) {
-    let best = null;
+  function viewAt(x, y, bg) {
+    let best = null, area = Infinity;
     Object.entries(project.views).forEach(([k, v]) => {
       const r = v.rect;
-      if (x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3]) best = k;
+      if (bg && v.bg !== bg) return;
+      if (x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3]) {
+        const a = (r[2] - r[0]) * (r[3] - r[1]);
+        if (a < area) { area = a; best = k; }
+      }
     });
     return best;
   }
   MapView.prototype.hitDevice = function (x, y) {
     let best = null, bd = Infinity;
     Object.entries(project.devices).forEach(([k, d]) => {
+      if (bgOfDev(d) !== this.bg) return;
       const hw = Math.max(d.w || 4, 2.5) / 2, hh = Math.max(d.h || 4, 2.5) / 2;
       if (x >= d.x - hw && x <= d.x + hw && y >= d.y - hh && y <= d.y + hh) {
         const dd = Math.abs(x - d.x) + Math.abs(y - d.y);
@@ -264,9 +336,8 @@
     return best;
   };
   function routeSegments(w) {
-    // polyline pieces in PDF coords: [{x1,y1,x2,y2,dash}]
     const r = w.route, out = [];
-    if (!r || !r.from || !r.to) return out;
+    if (!r || !r.from || !r.to || !isFinite(r.len)) return out;
     const A = r.from, B = r.to;
     const L = (p, q, dash) => {
       if (Math.abs(p.x - q.x) > 0.01 && Math.abs(p.y - q.y) > 0.01) {
@@ -286,35 +357,64 @@
     if (r.pb.proj) { L(last, r.pb.proj); L(r.pb.proj, B); } else L(last, B);
     return out;
   }
+  const wireBg = (w) => { const d = project.devices[E.splitPin(w.a).dev]; return d ? bgOfDev(d) : null; };
   MapView.prototype.draw = function () {
     if (!this.w && !this.resize()) return;
-    const ctx = this.ctx, s = this.scale;
+    const ctx = this.ctx, s = this.scale, bgId = this.bg;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, this.w, this.h);
     ctx.save();
     ctx.translate(-this.ox * s, -this.oy * s); ctx.scale(s, s);
-    const bg = project.background;
-    if (bgImage && bgImage.complete && bgImage.naturalWidth) {
+    const bg = project.backgrounds[bgId], img = bgImages[bgId];
+    if (bg && img && img.complete && img.naturalWidth) {
       ctx.globalAlpha = 0.55;
-      ctx.drawImage(bgImage, 0, 0, bg.ptWidth, bg.ptHeight);
+      ctx.drawImage(img, 0, 0, bg.ptWidth, bg.ptHeight);
       ctx.globalAlpha = 1;
     }
+    // views
+    const setup = ['view', 'ww', 'portal', 'del', 'device'].indexOf(this.mode) >= 0;
+    Object.entries(project.views).forEach(([k, v]) => {
+      if (v.bg !== bgId) return;
+      ctx.lineWidth = 1 / s; ctx.setLineDash(setup ? [] : [5 / s, 4 / s]);
+      ctx.strokeStyle = v.kind === 'graph' ? 'rgba(37, 99, 235, .55)' : 'rgba(22, 163, 74, .55)';
+      ctx.strokeRect(v.rect[0], v.rect[1], v.rect[2] - v.rect[0], v.rect[3] - v.rect[1]);
+      ctx.setLineDash([]);
+      if (setup || s > 1.5) {
+        ctx.fillStyle = v.kind === 'graph' ? '#1d4ed8' : '#15803d';
+        ctx.font = `${11 / s}px sans-serif`; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+        ctx.fillText(`${k}${v.loc ? ' · ' + v.loc : ''}`, v.rect[0] + 2 / s, v.rect[1] + 2 / s);
+      }
+    });
     // wireways
     if (this.showWW) {
       ctx.lineCap = 'butt';
       model.segs.forEach((sg) => {
-        ctx.strokeStyle = 'rgba(56, 132, 255, .18)'; ctx.lineWidth = 7.5;
+        if (project.views[sg.view].bg !== bgId) return;
+        ctx.strokeStyle = 'rgba(56, 132, 255, .2)'; ctx.lineWidth = 7.5;
         ctx.beginPath(); ctx.moveTo(sg.x1, sg.y1); ctx.lineTo(sg.x2, sg.y2); ctx.stroke();
+        if (setup) { ctx.strokeStyle = 'rgba(37,99,235,.9)'; ctx.lineWidth = 1 / s; ctx.stroke(); }
       });
       model.portals.forEach((p) => {
-        const a = model.nodes[p.anchor];
-        ctx.fillStyle = 'rgba(56,132,255,.6)';
-        ctx.beginPath(); ctx.arc(a.x, a.y, 1.6, 0, Math.PI * 2); ctx.fill();
+        const a = model.nodes[p.anchor], b = model.nodes[p.plate];
+        const inA = project.views[a.view].bg === bgId, inB = project.views[b.view].bg === bgId;
+        ctx.fillStyle = 'rgba(234,88,12,.85)';
+        [[a, inA], [b, inB && setup]].forEach(([q, ok]) => {
+          if (!ok) return;
+          ctx.beginPath(); ctx.arc(q.x, q.y, Math.max(1.6, 4 / s), 0, Math.PI * 2); ctx.fill();
+        });
+        if (inA && setup) {
+          ctx.font = `${10 / s}px sans-serif`; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
+          ctx.fillText(p.id, a.x + 3 / s, a.y - 2 / s);
+        }
+        if (setup && inA && inB) {
+          ctx.strokeStyle = 'rgba(234,88,12,.6)'; ctx.lineWidth = 1 / s; ctx.setLineDash([4 / s, 3 / s]);
+          ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); ctx.setLineDash([]);
+        }
       });
     }
-    // all wires
     const drawWire = (w, color, width, alpha) => {
-      ctx.globalAlpha = alpha; ctx.strokeStyle = color; ctx.lineWidth = width / s * 1.2;
+      if (wireBg(w) !== bgId) return;
+      ctx.strokeStyle = color;
       routeSegments(w).forEach((g) => {
         ctx.setLineDash(g.dash ? [4 / s, 4 / s] : []);
         ctx.globalAlpha = g.jump ? alpha * 0.35 : alpha;
@@ -327,12 +427,15 @@
     // devices
     const lbl = s > 3.2;
     Object.entries(project.devices).forEach(([k, d]) => {
-      const w = d.w || 4, h = d.h || 4;
+      if (bgOfDev(d) !== bgId) return;
+      const w = d.w || 4, h = d.h || 4, placed = d.view && project.views[d.view];
       ctx.lineWidth = 1 / s * 1.2;
-      ctx.strokeStyle = d.assumed ? '#ea580c' : '#334155';
+      ctx.setLineDash(placed ? [] : [3 / s, 2 / s]);
+      ctx.strokeStyle = d.assumed || !placed ? '#ea580c' : '#334155';
       ctx.fillStyle = selDev === k ? 'rgba(250, 204, 21, .55)' : d.assumed ? 'rgba(251, 146, 60, .25)' : 'rgba(255,255,255,.35)';
       ctx.fillRect(d.x - w / 2, d.y - h / 2, w, h);
       ctx.strokeRect(d.x - w / 2, d.y - h / 2, w, h);
+      ctx.setLineDash([]);
       if (lbl) {
         ctx.fillStyle = '#0f172a';
         ctx.font = `${Math.max(1.4, 11 / s)}px sans-serif`;
@@ -340,16 +443,28 @@
         ctx.fillText(k.replace(/^-/, ''), d.x, d.y - h / 2 - 7 / s);
       }
     });
-    // highlight
     const hl = this.highlight;
     const colors = ['#e11d48', '#2563eb', '#16a34a', '#9333ea', '#ea580c', '#0891b2'];
     hl.forEach((w, i) => drawWire(w, hl.length === 1 ? '#e11d48' : colors[i % colors.length], 3, 0.95));
     hl.forEach((w) => {
+      if (wireBg(w) !== bgId) return;
       [w.route && w.route.from, w.route && w.route.to].forEach((p) => {
         if (!p) return;
         ctx.fillStyle = '#e11d48'; ctx.beginPath(); ctx.arc(p.x, p.y, 4 / s, 0, Math.PI * 2); ctx.fill();
       });
     });
+    // tool previews
+    const t = this.temp;
+    if (t) {
+      ctx.strokeStyle = '#db2777'; ctx.lineWidth = 1.5 / s; ctx.setLineDash([4 / s, 3 / s]);
+      if (t.kind === 'rect') ctx.strokeRect(t.x0, t.y0, t.x1 - t.x0, t.y1 - t.y0);
+      else if (t.cur) {
+        let x2 = t.cur[0], y2 = t.cur[1];
+        if (t.kind === 'ww') { if (Math.abs(x2 - t.x) > Math.abs(y2 - t.y)) y2 = t.y; else x2 = t.x; }
+        ctx.beginPath(); ctx.moveTo(t.x, t.y); ctx.lineTo(x2, y2); ctx.stroke();
+      }
+      ctx.setLineDash([]);
+    }
     ctx.restore();
   };
   MapView.prototype.centerOn = function (x, y, zoom) {
@@ -359,8 +474,8 @@
   };
   MapView.prototype.focusWires = function (list) {
     const pts = [];
-    list.forEach((w) => routeSegments(w).forEach((g) => { pts.push([g.x1, g.y1], [g.x2, g.y2]); }));
-    if (!pts.length) return;
+    list.forEach((w) => { if (wireBg(w) === this.bg) routeSegments(w).forEach((g) => { pts.push([g.x1, g.y1], [g.x2, g.y2]); }); });
+    if (!pts.length) { this.fit(); return; }
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     pts.forEach((p) => { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); });
     const pad = 12;
@@ -369,13 +484,12 @@
 
   let mini, big;
   function setupMaps() {
-    mini = new MapView($('#miniMap'), {
-      onClick: (dev) => { if (dev) { $('#wSearch').value = dev; renderWires(); } }
-    });
-    big = new MapView($('#layoutMap'), {
-      onClick: (dev) => { selectDevice(dev); }
-    });
+    mini = new MapView($('#miniMap'), { onClick: (dev) => { if (dev) { $('#wSearch').value = dev; renderWires(); } } });
+    big = new MapView($('#layoutMap'), { onClick: onLayoutClick, onRect: onLayoutRect });
+    const first = Object.keys(project.backgrounds)[0] || null;
+    mini.bg = big.bg = first;
     window.addEventListener('resize', () => { if (mini.resize()) mini.draw(); if (big.resize()) big.draw(); });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && big.temp) { big.temp = null; big.draw(); } });
   }
   function selectWire(id) {
     selWire = id;
@@ -383,14 +497,13 @@
     $$('#wireTable tr.sel').forEach((tr) => tr.classList.remove('sel'));
     const tr = document.querySelector(`#wireTable tr[data-id="${id}"]`);
     if (tr) tr.classList.add('sel');
-    const netWires = wires.filter((x) => x.net === w.net);
+    const netWires = wires.filter((x) => x.net === w.net && x.loc === w.loc);
+    const b = wireBg(w); if (b) mini.bg = b;
     mini.highlight = [w];
     mini.resize(); mini.focusWires(netWires);
-    mini.highlight = [w];
-    mini.draw();
     const net = project.nets[w.net];
     const list = netWires.map((x) => `${x.cmp1}.${x.pin1} → ${x.cmp2}.${x.pin2}`).join('<br>');
-    $('#miniInfo').innerHTML = `<b>${esc(w.wire)}</b> (Sheet ${esc(net.sheet)}) · ${esc(w.cmp1)}.${esc(w.pin1)} → ${esc(w.cmp2)}.${esc(w.pin2)} · ${Math.round(w.len)} mm · ${esc((w.via || []).join(' › '))}` +
+    $('#miniInfo').innerHTML = `<b>${esc(w.wire)}</b> (Sheet ${esc(net.sheet)}${locs().length > 1 ? ', ' + esc(w.loc) : ''}) · ${esc(w.cmp1)}.${esc(w.pin1)} → ${esc(w.cmp2)}.${esc(w.pin2)} · ${isFinite(w.len) ? Math.round(w.len) + ' mm' : 'ยังไม่มีเส้นทาง'} · ${esc((w.via || []).join(' › '))}` +
       `<details><summary>ลำดับพ่วงทั้ง node (${netWires.length} เส้น)</summary><div class="mono">${list}</div></details>`;
   }
   function selectDevice(dev) {
@@ -399,24 +512,166 @@
     big.draw();
     if (dev) {
       const d = project.devices[dev];
-      toast(`${dev} · ${d.desc || ''} · ${project.views[d.view].name}${d.assumed ? ' · ตำแหน่งสมมติ' : ''} · ${big.highlight.length} เส้น`);
+      const v = d.view && project.views[d.view];
+      toast(`${dev} · ${d.desc || ''} · ${v ? v.name : 'ยังไม่อยู่ในมุมมอง'}${d.assumed ? ' · ตำแหน่งสมมติ' : ''} · ${big.highlight.length} เส้น`);
     }
   }
 
-  // ---------------------------------------------------------------- layout tab
+  // ---------------------------------------------------------------- layout setup tools
+  const HINTS = {
+    pan: 'ล้อเมาส์ = ซูม · ลากพื้นหลัง = เลื่อน · คลิกอุปกรณ์ = ดูสายที่ต่อ',
+    move: 'ลากกล่องอุปกรณ์ไปตำแหน่งจริง (ปล่อยในกรอบมุมมองใดก็ได้)',
+    device: 'คลิกตำแหน่งที่จะวางอุปกรณ์ แล้วใส่ชื่อ เช่น -K1 หรือ +RCC-X3',
+    view: 'ลากกรอบครอบ mounting plate / บานประตู / ผนังข้าง แล้วกรอกขนาดจริง',
+    ww: 'คลิกจุดเริ่มและจุดสิ้นสุดของรางวายเวย์ (บน mounting plate) — จับแนวตั้ง/แนวนอนให้อัตโนมัติ · Esc = ยกเลิก',
+    portal: 'คลิกจุดที่ 1 (เช่น บานพับประตู หรือปลายรางบนผนังข้าง) แล้วคลิกจุดที่ 2 บนรางวายเวย์ของแผงที่สายวิ่งเข้า · Esc = ยกเลิก',
+    del: 'คลิกรางวายเวย์ จุดเชื่อม อุปกรณ์ หรือในกรอบมุมมองเพื่อลบ'
+  };
+  function nearestSeg(p, maxD, viewFilter) {
+    let best = null, bd = maxD;
+    model.segs.forEach((sg) => {
+      if (project.views[sg.view].bg !== big.bg) return;
+      if (viewFilter && sg.view !== viewFilter) return;
+      const H = Math.abs(sg.y1 - sg.y2) < 1e-6;
+      const d = H ? (p[0] >= Math.min(sg.x1, sg.x2) - 1 && p[0] <= Math.max(sg.x1, sg.x2) + 1 ? Math.abs(p[1] - sg.y1) : Infinity)
+        : (p[1] >= Math.min(sg.y1, sg.y2) - 1 && p[1] <= Math.max(sg.y1, sg.y2) + 1 ? Math.abs(p[0] - sg.x1) : Infinity);
+      if (d < bd) { bd = d; best = sg; }
+    });
+    return best;
+  }
+  function snapWireway(view, x1, y1, x2, y2) {
+    const H = Math.abs(x2 - x1) > Math.abs(y2 - y1);
+    const same = project.wireways.filter((w) => (w[5] || 'PLATE') === view);
+    const tol = 6;
+    const snap = (v, list) => { let b = v, bd = tol; list.forEach((c) => { if (Math.abs(c - v) < bd) { bd = Math.abs(c - v); b = c; } }); return b; };
+    const vx = same.filter((w) => w[1] === w[3]).map((w) => w[1]);
+    const hy = same.filter((w) => w[2] === w[4]).map((w) => w[2]);
+    if (H) { const y = snap(y1, hy); return [snap(x1, vx), y, snap(x2, vx), y]; }
+    const x = snap(x1, vx);
+    return [x, snap(y1, hy), x, snap(y2, hy)];
+  }
+  function onLayoutClick(dev, p) {
+    const m = big.mode;
+    if (m === 'pan' || m === 'move') { selectDevice(dev); return; }
+    if (m === 'device') {
+      const name = (prompt('ชื่ออุปกรณ์ (เช่น -K1, -43CA, +RCC-X3):', '') || '').trim();
+      if (!name) return;
+      if (project.devices[name] && !confirm(name + ' มีอยู่แล้ว — ย้ายมาตำแหน่งนี้?')) return;
+      const v = viewAt(p[0], p[1], big.bg);
+      const isTB = /(^|-)(TB|X)\d|TB-?X/i.test(name);
+      if (project.devices[name] && /^เพิ่มจาก Netlist/.test(project.devices[name].desc || '')) project.devices[name].desc = '';
+      project.devices[name] = Object.assign(project.devices[name] || { desc: '' }, { view: v, bg: big.bg, x: +p[0].toFixed(2), y: +p[1].toFixed(2), w: isTB ? 5 : 5, h: isTB ? 30 : 5, assumed: false });
+      save(); recompute(); refreshAll();
+      return;
+    }
+    if (m === 'ww') {
+      const v = viewAt(p[0], p[1], big.bg);
+      if (!big.temp) {
+        if (!v || project.views[v].kind !== 'graph') { toast('เริ่มรางวายเวย์ภายในกรอบมุมมองชนิด Mounting plate'); return; }
+        big.temp = { kind: 'ww', x: p[0], y: p[1], view: v };
+        return;
+      }
+      const t = big.temp; big.temp = null;
+      const s = snapWireway(t.view, t.x, t.y, p[0], p[1]);
+      if (Math.abs(s[0] - s[2]) + Math.abs(s[1] - s[3]) < 2) { big.draw(); return; }
+      let n = project.wireways.length + 1; while (project.wireways.some((w) => w[0] === 'W' + n)) n++;
+      project.wireways.push(['W' + n, +s[0].toFixed(2), +s[1].toFixed(2), +s[2].toFixed(2), +s[3].toFixed(2), t.view]);
+      save(); recompute(); refreshAll();
+      return;
+    }
+    if (m === 'portal') {
+      const v = viewAt(p[0], p[1], big.bg);
+      if (!big.temp) {
+        if (!v) { toast('คลิกจุดเริ่มภายในกรอบมุมมอง (เช่น บานพับประตู หรือปลายรางบนผนังข้าง)'); return; }
+        big.temp = { kind: 'portal', x: p[0], y: p[1], view: v };
+        return;
+      }
+      const t = big.temp; big.temp = null;
+      if (!v || v === t.view) { toast('จุดที่สองต้องอยู่ในมุมมองอื่น (เช่น รางวายเวย์บน mounting plate)'); big.draw(); return; }
+      let px = p[0], py = p[1];
+      if (project.views[v].kind === 'graph') {
+        const sg = nearestSeg(p, 8, v);
+        if (!sg) { toast('คลิกให้ใกล้รางวายเวย์ของมุมมอง ' + v); big.draw(); return; }
+        const H = Math.abs(sg.y1 - sg.y2) < 1e-6;
+        px = H ? p[0] : sg.x1; py = H ? sg.y1 : p[1];
+      }
+      const door = project.views[t.view].kind === 'free' || project.views[v].kind === 'free';
+      const extra = +(prompt('ความยาวเผื่อของชุดสายผ่านจุดนี้ (mm)\n— บานพับประตู/swing panel มัก 400-600\n— ข้ามจากผนังข้างไปแผงหลัก 100-300', door ? '500' : '200') || 0);
+      let n = project.portals.length + 1; while (project.portals.some((q) => q[0] === 'J' + n)) n++;
+      const id = (prompt('ชื่อจุดเชื่อม (เช่น HINGE-L, SIDE-A):', door ? 'HINGE-' + n : 'J' + n) || 'J' + n).trim();
+      project.portals.push([id, t.view, +t.x.toFixed(2), +t.y.toFixed(2), +px.toFixed(2), +py.toFixed(2), extra, v, true]);
+      save(); recompute(); refreshAll();
+      return;
+    }
+    if (m === 'del') {
+      if (dev) { if (confirm('ลบอุปกรณ์ ' + dev + ' ? (node ที่อ้างถึงจะไม่มีตำแหน่ง)')) { delete project.devices[dev]; save(); recompute(); refreshAll(); } return; }
+      const pt = project.portals.findIndex((q) => project.views[q[1]] && project.views[q[1]].bg === big.bg && Math.hypot(q[2] - p[0], q[3] - p[1]) < 5 / Math.min(big.scale, 2) + 2);
+      if (pt >= 0) { if (confirm('ลบจุดเชื่อม ' + project.portals[pt][0] + ' ?')) { project.portals.splice(pt, 1); save(); recompute(); refreshAll(); } return; }
+      const sg = nearestSeg(p, 4);
+      if (sg) { if (confirm('ลบรางวายเวย์ ' + sg.id + ' ?')) { project.wireways = project.wireways.filter((w) => w[0] !== sg.id); save(); recompute(); refreshAll(); } return; }
+      const v = viewAt(p[0], p[1], big.bg);
+      if (v && confirm(`ลบมุมมอง ${v} (${project.views[v].name}) ? อุปกรณ์ในกรอบจะยังอยู่แต่ไม่มีเส้นทาง`)) {
+        delete project.views[v];
+        project.wireways = project.wireways.filter((w) => (w[5] || 'PLATE') !== v);
+        project.portals = project.portals.filter((q) => q[1] !== v && (q[7] || 'PLATE') !== v);
+        Object.values(project.devices).forEach((d) => { if (d.view === v) { d.bg = big.bg; d.view = null; } });
+        save(); recompute(); refreshAll();
+      }
+    }
+  }
+  function onLayoutRect(rect) {
+    const bgId = big.bg;
+    const bg = project.backgrounds[bgId] || {};
+    const defLoc = bg.loc || project.meta.loc || '';
+    modal('มุมมองใหม่', `
+      <div class="form">
+        <label>รหัสมุมมอง (ไม่ซ้ำ เช่น RCC_PLATE, RCC_DOOR)<input id="fvId" value="${esc((defLoc.replace(/\W/g, '') || 'V') + '_' + (Object.keys(project.views).length + 1))}"></label>
+        <label>ชื่อ<input id="fvName" value="Mounting plate"></label>
+        <label>ชนิด<select id="fvKind"><option value="graph">Mounting plate — สายวิ่งตามรางวายเวย์</option><option value="free">ประตู / swing panel / ผนังข้าง — สายวิ่งตรงไปจุดเชื่อม (บานพับ)</option></select></label>
+        <label>ตู้ (LOC.)<input id="fvLoc" value="${esc(defLoc)}" placeholder="เช่น LCC. หรือ RCC."></label>
+        <label>ความกว้างจริงของกรอบที่ลาก (mm) — ใช้คำนวณมาตราส่วน<input id="fvW" type="number" value="1000"></label>
+        <p class="note">กรอบกว้าง ${(rect[2] - rect[0]).toFixed(1)} pt × สูง ${(rect[3] - rect[1]).toFixed(1)} pt บนหน้า ${esc(bg.name || bgId)} · อ่านขนาดจากเส้นบอกขนาดใน Outline</p>
+      </div>`,
+    [['ยกเลิก', null], ['สร้างมุมมอง', () => {
+      const id = $('#fvId').value.trim().replace(/\s+/g, '_');
+      if (!id || project.views[id]) { toast('รหัสมุมมองว่างหรือซ้ำ'); return; }
+      const wmm = +$('#fvW').value || 1000;
+      const sc = wmm / (rect[2] - rect[0]);
+      project.views[id] = {
+        name: $('#fvName').value.trim() || id, kind: $('#fvKind').value, rect: rect.map((v) => +v.toFixed(2)),
+        bg: bgId, loc: $('#fvLoc').value.trim(), map: { x: [rect[0], +sc.toFixed(4)], y: [rect[1], +sc.toFixed(4)], z: 0 }
+      };
+      let n = 0;
+      Object.values(project.devices).forEach((d) => {
+        if (bgOfDev(d) === bgId && d.x >= rect[0] && d.x <= rect[2] && d.y >= rect[1] && d.y <= rect[3]) { d.view = viewAt(d.x, d.y, bgId); n++; }
+      });
+      save(); recompute(); refreshAll();
+      toast(`สร้างมุมมอง ${id} แล้ว (${n} อุปกรณ์อยู่ในกรอบ)${project.views[id].kind === 'graph' ? ' — ต่อไปวาดรางวายเวย์' : ' — ต่อไปกำหนดจุดเชื่อม/บานพับ'}`, 5000);
+    }]]);
+  }
+
+  // ---------------------------------------------------------------- layout tab lists
+  function renderBgSelect() {
+    const sel = $('#lBg');
+    const keys = Object.keys(project.backgrounds);
+    sel.innerHTML = keys.length ? keys.map((k) => `<option value="${esc(k)}">${esc(project.backgrounds[k].name || k)}${project.backgrounds[k].loc ? ' (' + esc(project.backgrounds[k].loc) + ')' : ''}</option>`).join('')
+      : '<option value="">— ยังไม่มีหน้า Outline —</option>';
+    if (big.bg && keys.indexOf(big.bg) < 0) big.bg = keys[0] || null;
+    if (!big.bg) big.bg = keys[0] || null;
+    sel.value = big.bg || '';
+  }
   function renderDevList() {
     const q = $('#dSearch').value.trim().toLowerCase();
     const items = Object.entries(project.devices)
-      .filter(([k, d]) => !q || (k + ' ' + d.desc).toLowerCase().includes(q))
-      .sort((a, b) => (b[1].assumed - a[1].assumed) || a[0].localeCompare(b[0], undefined, { numeric: true }));
+      .filter(([k, d]) => !q || (k + ' ' + (d.desc || '')).toLowerCase().includes(q))
+      .sort((a, b) => ((!b[1].view) - (!a[1].view)) || ((b[1].assumed ? 1 : 0) - (a[1].assumed ? 1 : 0)) || a[0].localeCompare(b[0], undefined, { numeric: true }));
     $('#devList').innerHTML = items.map(([k, d]) =>
-      `<div class="devitem ${d.assumed ? 'assumed' : ''}" data-dev="${esc(k)}"><span><b>${esc(k)}</b><br><span class="vw">${esc(d.desc || '')}</span></span><span class="vw">${esc(d.view)}</span></div>`).join('');
+      `<div class="devitem ${d.assumed || !d.view ? 'assumed' : ''}" data-dev="${esc(k)}"><span><b>${esc(k)}</b><br><span class="vw">${esc(d.desc || '')}</span></span><span class="vw">${esc(d.view || 'ยังไม่วาง')}</span></div>`).join('');
   }
   function renderNetSelect() {
     const sel = $('#lNet');
     const cur = sel.value;
-    const names = project.nets.map((n, i) => [i, `${n.wire}  (Sh.${n.sheet})`]);
-    sel.innerHTML = '<option value="">— เลือกเบอร์สายเพื่อไฮไลต์ —</option>' + names.map(([i, t]) => `<option value="${i}">${esc(t)}</option>`).join('');
+    sel.innerHTML = '<option value="">— เลือกเบอร์สายเพื่อไฮไลต์ —</option>' + project.nets.map((n, i) => `<option value="${i}">${esc(n.wire)}  (Sh.${esc(n.sheet)})</option>`).join('');
     sel.value = cur;
   }
 
@@ -424,15 +679,21 @@
   function pinsToText(net) {
     return net.pins.map((p) => (p[1] && p[1] !== net.sheet ? `${p[0]}@${p[1]}` : p[0])).join(' ');
   }
+  // accepts DEV:PIN, or the drawing notation DEV.PIN (e.g. -X3.201, +RCC-X3.201, -TBL-X2.101)
+  function normPin(t) {
+    if (t === 'GND' || t.indexOf(':') >= 0) return t;
+    const i = t.lastIndexOf('.');
+    return i > 0 ? t.slice(0, i) + ':' + t.slice(i + 1) : t;
+  }
   function textToPins(txt, sheet) {
     return txt.split(/[\s,;]+/).filter(Boolean).map((t) => {
       const i = t.lastIndexOf('@');
-      return i > 0 ? [t.slice(0, i), t.slice(i + 1)] : [t, sheet];
+      return i > 0 ? [normPin(t.slice(0, i)), t.slice(i + 1)] : [normPin(t), sheet];
     });
   }
   function fixedToText(net) { return (net.fixed || []).map((f) => f[0] + '>' + f[1]).join(' '); }
   function textToFixed(txt) {
-    return txt.split(/[\s,;]+/).filter(Boolean).map((t) => t.split('>')).filter((p) => p.length === 2);
+    return txt.split(/[\s,;]+/).filter(Boolean).map((t) => t.split('>').map(normPin)).filter((p) => p.length === 2);
   }
   function renderNets() {
     const q = $('#nSearch').value.trim().toLowerCase();
@@ -444,12 +705,13 @@
       if (q && !(n.wire + ' ' + pinsToText(n) + ' ' + (n.remark || '')).toLowerCase().includes(q)) return '';
       shown++;
       const r = plan[i];
-      const cls = `<select data-f="cls">${clsOpts.map((c) => `<option value="${esc(c)}" ${c === (n.cls || '') ? 'selected' : ''}>${esc(c ? c + ' — ' + cableText(c) : '(ว่าง)')}</option>`).join('')}</select>`;
+      const cls = `<select data-f="cls">${clsOpts.map((c) => `<option value="${esc(c)}" ${c === (n.cls || '') ? 'selected' : ''}>${esc(c ? c + ' — ' + (cableText(c) || 'ยังไม่กำหนดสี') : '(ว่าง)')}</option>`).join('')}</select>`;
+      const warn = r && r.warnings.length ? `<br><span class="hint" style="color:var(--warn)">${esc(r.warnings.slice(0, 2).join(' · '))}</span>` : '';
       return `<tr data-i="${i}">
         <td><input data-f="wire" value="${esc(n.wire)}" style="width:70px"></td>
         <td><input data-f="sheet" value="${esc(n.sheet)}" style="width:44px"></td>
         <td style="min-width:150px">${cls}</td>
-        <td style="min-width:320px"><textarea data-f="pins" rows="${Math.min(6, 1 + Math.floor(pinsToText(n).length / 70))}">${esc(pinsToText(n))}</textarea></td>
+        <td style="min-width:320px"><textarea data-f="pins" rows="${Math.min(6, 1 + Math.floor(pinsToText(n).length / 70))}">${esc(pinsToText(n))}</textarea>${warn}</td>
         <td style="min-width:150px"><textarea data-f="fixed" rows="1">${esc(fixedToText(n))}</textarea></td>
         <td><label class="chk"><input type="checkbox" data-f="keepOrder" ${n.keepOrder ? 'checked' : ''}> ตามแบบ</label></td>
         <td class="num">${r ? r.segments.length : 0}<br><span class="hint">${r ? Math.round(r.lenOpt) : 0} mm</span></td>
@@ -470,7 +732,10 @@
     else if (f === 'keepOrder') n.keepOrder = e.target.checked;
     else n[f] = e.target.value;
     const bad = n.pins.filter((p) => p[0] !== 'GND' && !project.devices[E.splitPin(p[0]).dev]);
-    if (bad.length) toast('ไม่พบอุปกรณ์: ' + bad.map((b) => b[0]).join(', ') + ' — เพิ่มอุปกรณ์ในผังก่อน หรือแก้ชื่อ');
+    if (bad.length) {
+      bad.forEach((b) => { project.devices[E.splitPin(b[0]).dev] = { view: null, bg: big.bg, x: 0, y: 0, w: 5, h: 5, desc: 'เพิ่มจาก Netlist — ยังไม่วาง', assumed: false }; });
+      toast('เพิ่มอุปกรณ์ใหม่ (ยังไม่วางตำแหน่ง): ' + bad.map((b) => E.splitPin(b[0]).dev).join(', ') + ' — ไปวางในแท็บผังอุปกรณ์', 6000);
+    }
     save(); recompute(); refreshAll(['nets']);
   }
 
@@ -495,10 +760,12 @@
     await ensurePdfWorker();
     const buf = await file.arrayBuffer();
     pdfDoc = await window.pdfjsLib.getDocument({ data: buf }).promise;
+    pdfName = file.name;
     const sel = $('#pPage');
     sel.innerHTML = Array.from({ length: pdfDoc.numPages }, (_, i) => `<option value="${i + 1}">หน้า ${i + 1}</option>`).join('');
-    $('#pInfo').textContent = `${file.name} · ${pdfDoc.numPages} หน้า (หน้า PDF = เลข Sheet)`;
-    pdfPage = 7; sel.value = '7';
+    $('#pInfo').textContent = `${file.name} · ${pdfDoc.numPages} หน้า`;
+    pdfPage = Math.min(pdfDoc.numPages, parseInt((project.meta.sheets || '1'), 10) || 1);
+    sel.value = String(pdfPage);
     renderPdfPage();
     toast('เปิด PDF แล้ว — ดูได้ในแท็บ “ดูแบบ PDF”');
   }
@@ -514,10 +781,22 @@
     await page.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise;
     $('#pZoom').textContent = Math.round(pdfZoom * 100) + '%';
   }
-  async function extractOutline() {
+  // device designations written as text on an outline page
+  const NOT_DEV = /^(IP\d+|M\d+|SS\d+|\d+(\.\d+)?[VAW]|\d+X\d+.*|[A-I]|\d+)$/i;
+  function asDevName(s) {
+    s = s.trim();
+    let m = s.match(/^([A-Z]{2,4})-TB-(X\w+)$/);           // LCC-TB-X3 -> +LCC-X3
+    if (m) return '+' + m[1] + '-' + m[2];
+    if (NOT_DEV.test(s)) return null;
+    if (s.indexOf('.') >= 0 && !/^-?\+?(TB-?)?X\d+\.\d$/i.test(s)) return null;   // 'AC.220V', 'GP.1' are nameplate text
+    if (!/^-?\+?[A-Z0-9][A-Z0-9.\-]{0,10}$/.test(s) || !/[A-Z]/.test(s) || !/\d/.test(s)) return null;
+    return s.startsWith('-') || s.startsWith('+') ? s : '-' + s;
+  }
+  async function extractOutline(addAsNew) {
     if (!pdfDoc) { toast('เปิดไฟล์ PDF ก่อน (ปุ่ม 📄 เปิด PDF)'); return; }
-    const pg = +(prompt('หน้า Outline drawing ที่มีอุปกรณ์ภายในตู้ (หน้า PDF):', String(project.meta.outlineSheet || 30)) || 0);
-    if (!pg) return;
+    const cur = project.backgrounds[big.bg];
+    const pg = +(prompt('หน้า Outline drawing ใน PDF (หน้าที่มีอุปกรณ์ภายในตู้):', String(addAsNew ? '' : (cur && cur.page) || project.meta.outlineSheet || '')) || 0);
+    if (!pg || pg > pdfDoc.numPages) return;
     const page = await pdfDoc.getPage(pg);
     const vp = page.getViewport({ scale: 1 });
     const tc = await page.getTextContent();
@@ -530,49 +809,75 @@
       const rot = Math.abs(it.transform[1]) > Math.abs(it.transform[0]);
       const w = it.width, x = tx[4], yb = tx[5];
       const cx = rot ? x - fh / 2 : x + w / 2, cy = rot ? yb - w / 2 : yb - fh / 2;
-      [s, '-' + s.replace(/^-/, '')].forEach((name) => {
-        if (project.devices[name] && !project.terminals[name] && name !== 'GND') {
-          (found[name] = found[name] || []).push([cx, cy]);
-        }
+      s.split(/\s+/).forEach((tok) => {
+        const cands = [tok, '-' + tok.replace(/^-/, '')];
+        let name = cands.find((c) => project.devices[c] && !project.terminals[c] && c !== 'GND');
+        let isNew = false;
+        if (!name) { name = asDevName(tok); isNew = true; }
+        if (!name) return;
+        (found[name] = found[name] || { pts: [], isNew: isNew && !project.devices[name] }).pts.push([cx, cy]);
       });
     });
     const names = Object.keys(found).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-    if (!names.length) { toast('ไม่พบชื่ออุปกรณ์เป็นข้อความในหน้านี้ (ข้อความอาจเป็นเส้น vector)'); return; }
+    const nNew = names.filter((n) => found[n].isNew).length;
+    const bgName = `${pdfName.replace(/\.pdf$/i, '')} หน้า ${pg}`;
     const rows = names.map((n) => {
-      const d = project.devices[n], p = found[n][0];
-      const dist = Math.hypot(d.x - p[0], d.y - p[1]);
-      return `<tr><td><input type="checkbox" data-n="${esc(n)}" ${d.assumed || dist > 15 ? 'checked' : ''}></td><td class="mono">${esc(n)}</td><td class="num">${d.x.toFixed(1)}, ${d.y.toFixed(1)}</td><td class="num">${p[0].toFixed(1)}, ${p[1].toFixed(1)}</td><td class="num">${dist.toFixed(1)}</td><td>${found[n].length > 1 ? 'พบ ' + found[n].length + ' จุด (ใช้จุดแรก)' : ''}</td></tr>`;
+      const d = project.devices[n], p = found[n].pts[0];
+      const dist = d && bgOfDev(d) === big.bg ? Math.hypot(d.x - p[0], d.y - p[1]) : Infinity;
+      const chk = found[n].isNew || (d && (d.assumed || !d.view)) || (!addAsNew && dist > 15);
+      return `<tr><td><input type="checkbox" data-n="${esc(n)}" ${chk ? 'checked' : ''}></td><td class="mono">${esc(n)}</td><td>${found[n].isNew ? '<span class="tag">ใหม่</span>' : ''}</td><td class="num">${d && isFinite(dist) ? d.x.toFixed(1) + ', ' + d.y.toFixed(1) : '—'}</td><td class="num">${p[0].toFixed(1)}, ${p[1].toFixed(1)}</td><td>${found[n].pts.length > 1 ? 'พบ ' + found[n].pts.length + ' จุด' : ''}</td></tr>`;
     }).join('');
-    modal(`พบอุปกรณ์ ${names.length} รายการบนหน้า ${pg}`,
-      `<p class="note">ตำแหน่งจาก PDF คือจุดกึ่งกลาง<b>ป้ายชื่อ</b>ของอุปกรณ์ (อาจอยู่เหนืออุปกรณ์เล็กน้อย) — ค่าเริ่มต้นเลือกเฉพาะอุปกรณ์ตำแหน่งสมมติ หรือที่ต่างจากเดิมมากกว่า 15 pt · หน้านี้จะถูกใช้เป็นภาพพื้นหลังผัง</p>
-       <div class="tablewrap" style="max-height:50vh"><table class="grid"><tr><th><input type="checkbox" onclick="document.querySelectorAll('#modalBody input[data-n]').forEach(function(c){c.checked=this.checked}, this)" title="เลือกทั้งหมด"></th><th>อุปกรณ์</th><th>เดิม (pt)</th><th>จาก PDF (pt)</th><th>ต่าง</th><th></th></tr>${rows}</table></div>`,
-      [['ยกเลิก', null], ['อัปเดตตำแหน่ง', async () => {
+    modal(`หน้า ${pg}: พบชื่ออุปกรณ์เป็นข้อความ ${names.length} รายการ (ใหม่ ${nNew})`,
+      `<p class="note">ตำแหน่งจาก PDF คือกึ่งกลาง<b>ป้ายชื่อ</b> (อาจอยู่เหนืออุปกรณ์เล็กน้อย) · ถ้าพบน้อยแสดงว่าชื่อในหน้านี้เป็นเส้น vector — ใช้เครื่องมือ “＋ วางอุปกรณ์” แทน</p>
+       <div class="form" style="grid-template-columns:1fr 1fr;margin-bottom:8px">
+         <label>ภาพพื้นหลัง<select id="fxBg"><option value="new" ${addAsNew || !cur ? 'selected' : ''}>เพิ่มเป็นหน้า Outline ใหม่</option>${cur ? `<option value="cur" ${addAsNew ? '' : 'selected'}>แทนที่หน้าปัจจุบัน (${esc(cur.name || big.bg)})</option>` : ''}</select></label>
+         <label>ตู้ (LOC.) ของหน้านี้<input id="fxLoc" value="${esc((cur && !addAsNew && cur.loc) || project.meta.loc || '')}" placeholder="เช่น LCC. / RCC."></label>
+       </div>
+       <div class="tablewrap" style="max-height:45vh"><table class="grid"><tr><th><input type="checkbox" onclick="document.querySelectorAll('#modalBody input[data-n]').forEach(function(c){c.checked=this.checked}, this)" title="เลือกทั้งหมด"></th><th>อุปกรณ์</th><th></th><th>เดิม (pt)</th><th>จาก PDF (pt)</th><th></th></tr>${rows}</table></div>`,
+      [['ยกเลิก', null], ['นำเข้า', async () => {
+        const mode = $('#fxBg').value, loc = $('#fxLoc').value.trim();
+        let bgId = big.bg;
+        if (mode === 'new' || !bgId) {
+          bgId = 'bg' + (Object.keys(project.backgrounds).length + 1);
+          while (project.backgrounds[bgId]) bgId += '_';
+        }
+        await setBackgroundFromPdf(page, vp, bgId, bgName, pg, loc);
         let n = 0;
         $$('#modalBody input[data-n]').forEach((cb) => {
           if (!cb.checked) return;
-          const d = project.devices[cb.dataset.n], p = found[cb.dataset.n][0];
-          d.x = +p[0].toFixed(2); d.y = +p[1].toFixed(2);
-          const v = viewAt(d.x, d.y); if (v) d.view = v;
+          let name = cb.dataset.n;
+          const p = found[name].pts[0];
+          // terminal blocks repeat in every cabinet (X1..X8): key them by cabinet, e.g. X3 -> +RCC-X3
+          if (loc && found[name].isNew && /^-(TB-?)?X\d/i.test(name)) name = '+' + loc.replace(/\W/g, '') + '-' + name.slice(1).replace(/^TB-?/i, '');
+          const d = project.devices[name] || (project.devices[name] = { desc: '', w: /(^|-)(TB|X)\d|-X\d/.test(name) ? 5 : 5, h: 5 });
+          d.x = +p[0].toFixed(2); d.y = +p[1].toFixed(2); d.bg = bgId;
+          d.view = viewAt(d.x, d.y, bgId);
+          if (loc && !d.view) d.loc = loc;
           d.assumed = false; n++;
         });
-        await setBackgroundFromPdf(page, vp);
-        save(); recompute(); refreshAll();
-        toast(`อัปเดต ${n} อุปกรณ์ และพื้นหลังจากหน้า ${pg} แล้ว`);
+        big.bg = bgId; big._fitted = false;
+        save(); recompute(); refreshAll(); big.fit();
+        toast(`นำเข้า ${n} อุปกรณ์บนหน้า ${pg} แล้ว — ต่อไปวาดมุมมองและรางวายเวย์`, 5000);
       }]]);
   }
-  async function setBackgroundFromPdf(page, vp1) {
+  async function setBackgroundFromPdf(page, vp1, bgId, name, pg, loc) {
     const vp = page.getViewport({ scale: 2.5 });
     const cv = document.createElement('canvas');
     cv.width = vp.width; cv.height = vp.height;
     await page.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise;
-    const url = cv.toDataURL('image/jpeg', 0.82);
-    project.background = { src: url, ptWidth: vp1.width, ptHeight: vp1.height };
-    loadBg();
+    const url = cv.toDataURL('image/jpeg', 0.8);
+    const old = project.backgrounds[bgId] || {};
+    project.backgrounds[bgId] = { src: url, ptWidth: vp1.width, ptHeight: vp1.height, name: name || old.name || bgId, page: pg, loc: loc || old.loc || '' };
+    loadBg(bgId);
   }
-  function loadBg() {
-    bgImage = new Image();
-    bgImage.onload = () => { mini.draw(); big.draw(); };
-    bgImage.src = project.background.src;
+  function loadBg(id) {
+    const ids = id ? [id] : Object.keys(project.backgrounds);
+    ids.forEach((k) => {
+      const img = new Image();
+      img.onload = () => { mini.draw(); big.draw(); };
+      img.src = project.backgrounds[k].src;
+      bgImages[k] = img;
+    });
   }
 
   // ---------------------------------------------------------------- modal
@@ -593,9 +898,9 @@
 
   // ---------------------------------------------------------------- settings
   const META_FIELDS = [
-    ['title', 'หัวเรื่อง (แถวที่ 1)'], ['panelName', 'ชื่อตู้'], ['loc', 'LOC. (เช่น TCC.)'],
+    ['title', 'หัวเรื่อง (แถวที่ 1)'], ['panelName', 'ชื่อตู้ / ชุดตู้'], ['loc', 'LOC. ตั้งต้น (เช่น TCC., LCC.)'],
     ['processNo', 'Process No.'], ['drawingNo', 'Drawing No. (Wiring list)'], ['schematicDwg', 'Schematic drawing no.'],
-    ['project', 'Project'], ['contract', 'Contract no.'], ['rev', 'Rev.']
+    ['sheets', 'Sheet วงจรที่ใช้ (เช่น 07-22)'], ['project', 'Project'], ['contract', 'Contract no.'], ['rev', 'Rev.']
   ];
   function renderSettings() {
     const m = project.meta;
@@ -603,9 +908,10 @@
     $('#sMode').value = project.settings.mode;
     $('#sAllow').value = project.settings.allow;
     $('#sRound').value = project.settings.round;
-    $('#cableTable').innerHTML = '<table class="grid"><tr><th>รหัส</th><th>วงจร</th><th>สี</th><th>ขนาด</th></tr>' +
+    $('#sJump').value = project.settings.jumper;
+    $('#cableTable').innerHTML = '<table class="grid"><tr><th>รหัส</th><th>วงจร</th><th>สี</th><th>ขนาด</th><th></th></tr>' +
       Object.entries(project.cable).filter(([k]) => k).map(([k, c]) =>
-        `<tr data-c="${esc(k)}"><td class="mono">${esc(k)}</td><td>${esc(c.label)}</td><td><input data-cf="color" value="${esc(c.color)}" style="width:60px"></td><td><input data-cf="size" value="${esc(c.size)}" style="width:60px"></td></tr>`).join('') + '</table>';
+        `<tr data-c="${esc(k)}"><td class="mono">${esc(k)}</td><td><input data-cf="label" value="${esc(c.label)}"></td><td><input data-cf="color" value="${esc(c.color)}" style="width:60px"></td><td><input data-cf="size" value="${esc(c.size)}" style="width:60px"></td><td><button class="iconbtn" data-delcls="${esc(k)}" title="ลบ">✕</button></td></tr>`).join('') + '</table>';
   }
 
   // ---------------------------------------------------------------- CSV netlist
@@ -634,15 +940,56 @@
     document.body.appendChild(a); a.click();
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
   }
+  function ensureDevicesFor(nets) {
+    const added = [];
+    nets.forEach((n) => n.pins.forEach((p) => {
+      const dev = E.splitPin(p[0]).dev;
+      if (p[0] !== 'GND' && !project.devices[dev]) { project.devices[dev] = { view: null, bg: big.bg, x: 0, y: 0, w: 5, h: 5, desc: 'เพิ่มจาก Netlist — ยังไม่วาง', assumed: false }; added.push(dev); }
+    }));
+    if (!project.devices.GND && nets.some((n) => n.pins.some((p) => p[0] === 'GND'))) { project.devices.GND = { view: null, bg: big.bg, x: 0, y: 0, w: 20, h: 2, desc: 'Earth bar', assumed: false }; added.push('GND'); }
+    return added;
+  }
+
+  // ---------------------------------------------------------------- new project
+  function newProject() {
+    modal('โปรเจกต์ใหม่', `
+      <p class="note">เริ่มจากโปรเจกต์ว่างสำหรับตู้/แบบอื่น (โปรเจกต์ปัจจุบันจะถูกแทนที่ในเบราว์เซอร์ — กด 💾 บันทึกโปรเจกต์ เก็บไว้ก่อนถ้าต้องการ)</p>
+      <div class="form">
+        <label>Process No.<input id="npProc" placeholder="เช่น PP0993B"></label>
+        <label>ตู้ (คั่นด้วย , ถ้ามีหลายตู้)<input id="npLocs" value="LCC., RCC."></label>
+        <label>Schematic drawing no.<input id="npDwg" placeholder="เช่น CD-PP0993B-4S1"></label>
+        <label>Sheet วงจร<input id="npSheets" placeholder="เช่น 16-38"></label>
+        <label>Project<input id="npProj"></label>
+      </div>
+      <p class="note">ขั้นตอนต่อไป: 📄 เปิด PDF → แท็บผังอุปกรณ์ “+ หน้า Outline” (ทำทีละตู้) → วาดมุมมอง / รางวายเวย์ / บานพับ → วางอุปกรณ์ → แท็บ Netlist เพิ่ม node หรือนำเข้า CSV → ตั้งค่าสี/ขนาดสายตาม General spec</p>`,
+    [['ยกเลิก', null], ['สร้าง', () => {
+      const L = $('#npLocs').value.split(',').map((s) => s.trim()).filter(Boolean);
+      const proc = $('#npProc').value.trim() || 'NEW';
+      project = migrate({
+        version: BASE.version,
+        meta: {
+          project: $('#npProj').value.trim() || '(TBD)', processNo: proc, schematicDwg: $('#npDwg').value.trim(), drawingNo: '(TBD)',
+          contract: '(TBD)', loc: L[0] || 'LCC.', panelName: L.join(' / '), title: `${(L[0] || 'LCC.').replace(/\.$/, '')} INTERNAL CABLE WIRING ${proc}`,
+          rev: '0', sheets: $('#npSheets').value.trim(), outlineSheet: ''
+        },
+        cable: clone(NEW_CABLE), views: {}, wireways: [], portals: [], devices: {}, terminals: {}, bars: {}, nets: [],
+        backgrounds: {}, anomalies: [], noInternal: {}
+      });
+      big.bg = mini.bg = null; selWire = null; selDev = null;
+      save(); recompute(); renderSettings(); refreshAll();
+      toast('สร้างโปรเจกต์ใหม่แล้ว — เปิด PDF แล้วเพิ่มหน้า Outline', 5000);
+    }]]);
+  }
 
   // ---------------------------------------------------------------- wiring
   function refreshAll(skip) {
     skip = skip || [];
     renderOverview();
-    sheetOptions($('#wSheet')); sheetOptions($('#nSheet'));
+    sheetOptions($('#wSheet')); sheetOptions($('#nSheet')); locOptions();
     renderWires();
     if (skip.indexOf('nets') < 0) renderNets();
-    renderDevList(); renderNetSelect();
+    renderBgSelect(); renderDevList(); renderNetSelect();
+    if (!mini.bg || !project.backgrounds[mini.bg]) mini.bg = big.bg;
     if (mini) { mini.highlight = selWire != null && wires[selWire] ? [wires[selWire]] : []; mini.draw(); }
     if (big) big.draw();
   }
@@ -653,28 +1000,33 @@
       if (t.dataset.tab === 'layout') { requestAnimationFrame(() => { if (!big._fitted) { big.fit(); big._fitted = true; } else { big.resize(); big.draw(); } }); }
       if (t.dataset.tab === 'wires') { requestAnimationFrame(() => { if (!mini._fitted) { mini.fit(); mini._fitted = true; } else { mini.resize(); mini.draw(); } }); }
     }));
-    ['#wSearch', '#wSheet', '#wSort', '#wBlank', '#wRemark'].forEach((s) => $(s).addEventListener('input', renderWires));
+    ['#wSearch', '#wSheet', '#wSort', '#wBlank', '#wRemark', '#wLoc'].forEach((s) => $(s).addEventListener('input', renderWires));
     $('#wireTable').addEventListener('click', (e) => {
       const tr = e.target.closest('tr[data-id]');
       if (tr) selectWire(+tr.dataset.id);
     });
     // layout
-    $('#lEdit').addEventListener('change', (e) => { big.edit = e.target.checked; toast(big.edit ? 'ลากกล่องอุปกรณ์เพื่อย้ายตำแหน่ง (วางในมุมมองใดก็ได้)' : 'ปิดโหมดแก้ไข'); });
+    $('#lMode').addEventListener('change', (e) => { big.mode = e.target.value; big.temp = null; $('#lHint').textContent = HINTS[big.mode]; big.draw(); });
+    $('#lBg').addEventListener('change', (e) => { big.bg = e.target.value; big.fit(); });
+    $('#lAddBg').addEventListener('click', () => extractOutline(true));
     $('#lWire').addEventListener('change', (e) => { big.showWW = e.target.checked; big.draw(); });
     $('#lAll').addEventListener('change', (e) => { big.showAll = e.target.checked; big.draw(); });
     $('#lFit').addEventListener('click', () => big.fit());
     $('#lNet').addEventListener('change', (e) => {
       const i = e.target.value;
       big.highlight = i === '' ? [] : wires.filter((w) => w.net === +i);
-      if (big.highlight.length) big.focusWires(big.highlight); else big.draw();
+      if (big.highlight.length) { const b = wireBg(big.highlight[0]); if (b && b !== big.bg) { big.bg = b; $('#lBg').value = b; } big.focusWires(big.highlight); } else big.draw();
     });
-    $('#lExtract').addEventListener('click', extractOutline);
+    $('#lExtract').addEventListener('click', () => extractOutline(false));
     $('#dSearch').addEventListener('input', renderDevList);
     $('#devList').addEventListener('click', (e) => {
       const it = e.target.closest('[data-dev]');
       if (!it) return;
-      const d = project.devices[it.dataset.dev];
-      selectDevice(it.dataset.dev);
+      const name = it.dataset.dev, d = project.devices[name];
+      const b = bgOfDev(d);
+      if (b && b !== big.bg) { big.bg = b; $('#lBg').value = b; }
+      selectDevice(name);
+      if (!d.view && !d.x) { toast(`${name} ยังไม่ได้วาง — เลือกเครื่องมือ “＋ วางอุปกรณ์” แล้วคลิกตำแหน่ง ใส่ชื่อ ${name}`, 5000); return; }
       big.centerOn(d.x, d.y, Math.max(big.scale, 6));
     });
     // nets
@@ -719,9 +1071,14 @@
           keepOrder: ix('keeporder') >= 0 && !!(r[ix('keeporder')] || '').trim(), remark: ix('remark') >= 0 ? r[ix('remark')] || '' : ''
         };
       });
-      modal('นำเข้า Netlist', `<p>พบ ${nets.length} node ในไฟล์ <b>${esc(f.name)}</b></p>`,
-        [['ยกเลิก', null], ['เพิ่มต่อท้าย', () => { project.nets = project.nets.concat(nets); save(); recompute(); refreshAll(); }],
-         ['แทนที่ทั้งหมด', () => { project.nets = nets; save(); recompute(); refreshAll(); }]]);
+      const apply = (replace) => {
+        project.nets = replace ? nets : project.nets.concat(nets);
+        const added = ensureDevicesFor(nets);
+        save(); recompute(); refreshAll();
+        if (added.length) toast(`เพิ่มอุปกรณ์ใหม่ ${added.length} รายการ (ยังไม่วางตำแหน่ง)`, 5000);
+      };
+      modal('นำเข้า Netlist', `<p>พบ ${nets.length} node ในไฟล์ <b>${esc(f.name)}</b></p><p class="note">อุปกรณ์ที่ยังไม่มีในโปรเจกต์จะถูกเพิ่มเป็น “ยังไม่วาง”</p>`,
+        [['ยกเลิก', null], ['เพิ่มต่อท้าย', () => apply(false)], ['แทนที่ทั้งหมด', () => apply(true)]]);
       e.target.value = '';
     });
     // pdf
@@ -732,6 +1089,7 @@
     $('#pZoomIn').addEventListener('click', () => { pdfZoom = Math.min(6, pdfZoom * 1.25); renderPdfPage(); });
     $('#pZoomOut').addEventListener('click', () => { pdfZoom = Math.max(0.5, pdfZoom / 1.25); renderPdfPage(); });
     // project
+    $('#btnNewProj').addEventListener('click', newProject);
     $('#btnSaveProj').addEventListener('click', () => {
       download(`wiring_project_${project.meta.processNo}.json`, new Blob([JSON.stringify(project, null, 1)], { type: 'application/json' }));
     });
@@ -740,35 +1098,56 @@
       try {
         const p = JSON.parse(await f.text());
         if (!p.nets || !p.devices || !p.views) throw new Error('ไม่ใช่ไฟล์โปรเจกต์');
-        project = p; project.settings = Object.assign({}, DEFAULT_SETTINGS, p.settings || {});
+        project = migrate(p);
+        big.bg = mini.bg = Object.keys(project.backgrounds)[0] || null; big._fitted = mini._fitted = false;
         save(); recompute(); loadBg(); renderSettings(); refreshAll(); toast('โหลดโปรเจกต์แล้ว');
       } catch (err) { toast('โหลดไม่ได้: ' + err.message); }
       e.target.value = '';
     });
     $('#btnReset').addEventListener('click', () => {
-      if (!confirm('ล้างการแก้ไขทั้งหมดและกลับไปใช้ข้อมูลตั้งต้น?')) return;
-      project = clone(BASE); project.settings = Object.assign({}, DEFAULT_SETTINGS);
+      if (!confirm('ล้างการแก้ไขทั้งหมดและกลับไปใช้ข้อมูลตั้งต้น (PP1047A TCC)?')) return;
+      project = migrate(clone(BASE));
+      big.bg = mini.bg = Object.keys(project.backgrounds)[0]; big._fitted = mini._fitted = false;
       save(); recompute(); loadBg(); renderSettings(); refreshAll(); toast('รีเซ็ตแล้ว');
     });
     // settings
     $('#metaForm').addEventListener('input', (e) => { const k = e.target.dataset.meta; if (k) { project.meta[k] = e.target.value; save(); renderOverview(); } });
     $('#sMode').addEventListener('change', (e) => { project.settings.mode = e.target.value; save(); recompute(); refreshAll(); });
     $('#sAllow').addEventListener('change', (e) => { project.settings.allow = Math.max(0, +e.target.value || 0); save(); recompute(); refreshAll(); });
+    $('#sJump').addEventListener('change', (e) => { project.settings.jumper = Math.max(0, +e.target.value || 0); save(); recompute(); refreshAll(); });
     $('#sRound').addEventListener('change', (e) => { project.settings.round = Math.max(1, +e.target.value || 1); save(); recompute(); refreshAll(); });
     $('#cableTable').addEventListener('change', (e) => {
-      const tr = e.target.closest('tr[data-c]'); if (!tr) return;
+      const tr = e.target.closest('tr[data-c]'); if (!tr || !e.target.dataset.cf) return;
       project.cable[tr.dataset.c][e.target.dataset.cf] = e.target.value.trim();
       save(); refreshAll();
     });
+    $('#cableTable').addEventListener('click', (e) => {
+      const k = e.target.dataset && e.target.dataset.delcls;
+      if (!k) return;
+      const used = project.nets.filter((n) => n.cls === k).length;
+      if (!confirm(`ลบประเภท ${k}?${used ? ` (${used} node ที่ใช้อยู่จะกลายเป็นว่าง)` : ''}`)) return;
+      delete project.cable[k];
+      project.nets.forEach((n) => { if (n.cls === k) n.cls = ''; });
+      save(); renderSettings(); recompute(); refreshAll();
+    });
+    $('#btnAddCls').addEventListener('click', () => {
+      const k = (prompt('รหัสประเภทวงจร (ภาษาอังกฤษ เช่น AC_PWR_FAN):', '') || '').trim().toUpperCase().replace(/\W/g, '_');
+      if (!k || project.cable[k]) return;
+      project.cable[k] = { label: prompt('ชื่อวงจร (ตาม General spec):', k) || k, color: '', size: '' };
+      save(); renderSettings(); refreshAll();
+    });
     // excel
     $('#btnExcel').addEventListener('click', async () => {
+      const btn = $('#btnExcel');
       try {
-        const btn = $('#btnExcel'); btn.disabled = true;
+        btn.disabled = true;
         const blob = await window.WiringExport.toExcel(project, wires, plan, { sort: $('#wSort').value, sortedWires: sortedWires, cableText: cableText, model: model });
-        download(`Internal_Wiring_${(project.meta.loc || '').replace(/\W/g, '')}_${project.meta.processNo}.xlsx`, blob);
-        btn.disabled = false;
+        const L = locs();
+        const tag = L.length > 1 ? L.map((l) => l.replace(/\W/g, '')).join('_') : (project.meta.loc || '').replace(/\W/g, '');
+        download(`Internal_Wiring_${tag}_${project.meta.processNo}.xlsx`, blob);
         toast('ส่งออก Excel แล้ว');
-      } catch (err) { $('#btnExcel').disabled = false; toast('ส่งออกไม่ได้: ' + err.message, 6000); console.error(err); }
+      } catch (err) { toast('ส่งออกไม่ได้: ' + err.message, 6000); console.error(err); }
+      btn.disabled = false;
     });
   }
 
@@ -780,5 +1159,5 @@
   bind();
   renderSettings();
   refreshAll();
-  window.IWP = { get project() { return project; }, get wires() { return wires; }, get plan() { return plan; }, recompute: recompute };
+  window.IWP = { get project() { return project; }, get wires() { return wires; }, get plan() { return plan; }, recompute: recompute, get maps() { return { mini: mini, big: big }; } };
 })();

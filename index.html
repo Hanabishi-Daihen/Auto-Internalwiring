@@ -19,6 +19,7 @@
     <label class="btn ghost" title="เปิดไฟล์ Schematic PDF เพื่อดูแบบ / ดึงตำแหน่งจาก Outline">
       <input type="file" id="pdfFile" accept="application/pdf" hidden>📄 เปิด PDF
     </label>
+    <button class="btn ghost" id="btnNewProj" title="เริ่มโปรเจกต์ใหม่ (ตู้/แบบอื่น)">🆕 โปรเจกต์ใหม่</button>
     <label class="btn ghost" title="โหลดโปรเจกต์ (.json)">
       <input type="file" id="projFile" accept=".json,application/json" hidden>📂 โหลดโปรเจกต์
     </label>
@@ -65,6 +66,7 @@
   <section class="panel" id="tab-wires">
     <div class="toolbar">
       <input type="search" id="wSearch" placeholder="ค้นหา เบอร์สาย / อุปกรณ์ / ขั้ว เช่น P1, -K5, TB03">
+      <select id="wLoc"><option value="">ทุกตู้</option></select>
       <select id="wSheet"><option value="">ทุก Sheet</option></select>
       <select id="wSort">
         <option value="sheet">เรียงตามแบบ (Sheet / เบอร์สาย)</option>
@@ -87,13 +89,23 @@
   <!-- ============================ LAYOUT -->
   <section class="panel" id="tab-layout">
     <div class="toolbar">
-      <label class="chk"><input type="checkbox" id="lEdit"> โหมดแก้ไขตำแหน่ง (ลากอุปกรณ์)</label>
+      <select id="lBg" title="หน้า Outline ที่แสดง"></select>
+      <button class="btn small ghost" id="lAddBg" title="เพิ่มหน้า Outline จาก PDF ที่เปิดอยู่ (เช่น Outline ของ RCC)">+ หน้า Outline</button>
+      <select id="lMode" title="เครื่องมือ">
+        <option value="pan">✋ เลื่อน / เลือก</option>
+        <option value="move">↔ ย้ายอุปกรณ์</option>
+        <option value="device">＋ วางอุปกรณ์</option>
+        <option value="view">▭ วาดมุมมอง (plate / ประตู / ผนัง)</option>
+        <option value="ww">═ วาดรางวายเวย์</option>
+        <option value="portal">⤳ จุดเชื่อม/บานพับ</option>
+        <option value="del">✕ ลบ</option>
+      </select>
       <label class="chk"><input type="checkbox" id="lWire" checked> แสดงรางวายเวย์</label>
       <label class="chk"><input type="checkbox" id="lAll"> แสดงสายทั้งหมด</label>
       <select id="lNet"><option value="">— เลือกเบอร์สายเพื่อไฮไลต์ —</option></select>
       <button class="btn small" id="lFit">พอดีจอ</button>
       <button class="btn small" id="lExtract" title="ต้องเปิด PDF ก่อน">ดึงตำแหน่งจาก PDF (Outline)</button>
-      <span class="hint">ล้อเมาส์ = ซูม · ลากพื้นหลัง = เลื่อน</span>
+      <span class="hint" id="lHint">ล้อเมาส์ = ซูม · ลากพื้นหลัง = เลื่อน</span>
     </div>
     <div class="split layoutsplit">
       <div class="mapwrap big"><canvas id="layoutMap"></canvas></div>
@@ -151,9 +163,11 @@
           </label>
           <label>เผื่อปลายสายต่อปลาย (mm)<input type="number" id="sAllow" min="0" step="10"></label>
           <label>ปัดความยาวตัดสายขึ้นทีละ (mm)<input type="number" id="sRound" min="1" step="10"></label>
+          <label>ความยาวจัมเปอร์ระหว่างขาบนอุปกรณ์ตัวเดียวกัน (mm)<input type="number" id="sJump" min="0" step="10"></label>
         </div>
         <h3>ตารางสี/ขนาดสาย (Sheet 03 — Cable for wiring)</h3>
         <div id="cableTable"></div>
+        <div class="rowbtn" style="margin-top:8px"><button class="btn small ghost" id="btnAddCls">+ เพิ่มประเภทวงจร</button></div>
         <h3>ข้อมูลโปรเจกต์</h3>
         <div class="rowbtn">
           <button class="btn small ghost" id="btnReset">รีเซ็ตเป็นข้อมูลตั้งต้นของโปรเจกต์</button>

@@ -536,6 +536,7 @@ data = {
     'meta': META, 'cable': CABLE, 'views': VIEWS, 'wireways': WIREWAYS, 'portals': PORTALS,
     'devices': DEV, 'terminals': TERMS, 'bars': BARS, 'barEntry': BAR_ENTRY, 'nets': NETS,
     'noInternal': NO_INTERNAL, 'anomalies': ANOMALIES,
+    'zoneRows': {'PLATE': [[190, 'R1'], [220, 'R2'], [9999, 'R3']]},
     'background': {'src': 'data/pp1047a_outline_sheet30.png', 'ptWidth': 842, 'ptHeight': 595},
 }
 with open(OUT, 'w', encoding='utf-8') as f:

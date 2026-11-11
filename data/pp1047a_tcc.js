@@ -9826,6 +9826,22 @@ window.PROJECT_DATA = {
   "Sheet 08: FL1 (lamp), 92L (door switch) และ Earth bar ไม่ได้แสดงใน Sheet 30 - วางตำแหน่งสมมติ",
   "Sheet 13: คอนแทคช่วย 8DM (4-1) ใช้เบอร์ชนกับขั้วหลัก -> ระบุ 1(AUX)/4(AUX)"
  ],
+ "zoneRows": {
+  "PLATE": [
+   [
+    190,
+    "R1"
+   ],
+   [
+    220,
+    "R2"
+   ],
+   [
+    9999,
+    "R3"
+   ]
+  ]
+ },
  "background": {
   "src": "data/pp1047a_outline_sheet30.png",
   "ptWidth": 842,
