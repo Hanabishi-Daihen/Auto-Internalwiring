@@ -1173,47 +1173,80 @@
     const lo = opus ? 0.12 : 0.06, hi = opus ? 0.3 : 0.15;
     $('#aCost').textContent = pages ? `ค่าใช้จ่ายโดยประมาณ ${pages} หน้า × $${lo}–${hi} ≈ $${(pages * lo).toFixed(1)}–${(pages * hi).toFixed(1)} (ขึ้นกับความซับซ้อนของแบบ)` : '';
   }
-  async function runAuto() {
+  // AI page cache in this browser: a re-run does not pay again for pages already read
+  const BCACHE = 'iwp.bcache.';
+  const bCache = {
+    get(k) { try { const v = localStorage.getItem(BCACHE + k); return v ? JSON.parse(v) : null; } catch (e) { return null; } },
+    set(k, v) {
+      try { localStorage.setItem(BCACHE + k, JSON.stringify(v)); } catch (e) {
+        // storage full: drop older cached pages and try once more
+        try { Object.keys(localStorage).filter((x) => x.startsWith(BCACHE)).slice(0, 20).forEach((x) => localStorage.removeItem(x)); localStorage.setItem(BCACHE + k, JSON.stringify(v)); } catch (e2) { /* ignore */ }
+      }
+    }
+  };
+  let autoAbort = null;
+  const pdfKey = () => (pdfDoc && pdfDoc.fingerprints && pdfDoc.fingerprints[0]) || (pdfName + ':' + (pdfDoc ? pdfDoc.numPages : 0));
+  async function runAuto(preloaded) {
     if (!pdfDoc) { toast('เลือกไฟล์ Schematic PDF ก่อน'); return; }
     const A = window.AutoBuild;
-    const pages = A.parsePages($('#aSch').value, pdfDoc.numPages);
+    const pages = preloaded ? preloaded.pages : A.parsePages($('#aSch').value, pdfDoc.numPages);
     const cabs = autoCabRows();
     if (!pages.length) { toast('ใส่หน้า Schematic เช่น 7-22'); return; }
     if (!cabs.length) { toast('ใส่ชื่อตู้อย่างน้อย 1 ตู้'); return; }
-    const method = ($$('input[name=aMethod]').find((r) => r.checked) || {}).value || 'A';
+    const method = preloaded ? preloaded.method : (($$('input[name=aMethod]').find((r) => r.checked) || {}).value || 'A');
     const key = $('#aKey').value.trim();
-    if (method === 'B' && !key) { toast('ใส่ Anthropic API key สำหรับวิธี B'); return; }
-    try { if ($('#aKeyRemember').checked && key) localStorage.setItem(KEY_STORE, key); else localStorage.removeItem(KEY_STORE); } catch (e) { /* ignore */ }
+    if (!preloaded && method === 'B' && !key) { toast('ใส่ Anthropic API key สำหรับวิธี B'); return; }
+    if (!preloaded && method === 'B') { try { if ($('#aKeyRemember').checked && key) localStorage.setItem(KEY_STORE, key); else localStorage.removeItem(KEY_STORE); } catch (e) { /* ignore */ } }
     $('#aLog').textContent = ''; $('#aResult').hidden = true; $('#aRun').disabled = true;
+    autoAbort = new AbortController(); $('#aCancel').hidden = method !== 'B' || !!preloaded;
     const t0 = Date.now();
     try {
       const cabinets = cabs.map((c) => c.loc);
-      const prog = async (m, f) => { autoLog(m, f * 0.8); await new Promise((r) => setTimeout(r, 0)); };
-      let sheets;
-      if (method === 'A') {
+      const prog = async (m, f) => { autoLog(m, f * 0.75); await new Promise((r) => setTimeout(r, 0)); };
+      let sheets, info = { model: '', usage: null, cost: 0, failed: [] };
+      if (preloaded) {
+        sheets = preloaded.sheets; info = Object.assign(info, preloaded.info || {});
+        autoLog(`ใช้ผลการอ่านจากไฟล์ (${method === 'A' ? 'วิธี A' : 'วิธี B · ' + (info.model || '')}) ${sheets.length} หน้า`);
+      } else if (method === 'A') {
         sheets = await A.readSheetsA(pdfDoc, pages, window.pdfjsLib.OPS, window.GLYPH_TEMPLATES, prog);
       } else {
-        const r = await A.readSheetsB(pdfDoc, pages, { apiKey: key, model: $('#aModel').value, cabinets: cabinets }, prog);
+        const model = $('#aModel').value;
+        const r = await A.readSheetsB(pdfDoc, pages, {
+          apiKey: key, model: model, cabinets: cabinets, signal: autoAbort.signal, cache: bCache, fileKey: pdfKey(),
+          hints: $('#aHints').checked, OPS: window.pdfjsLib.OPS, templates: window.GLYPH_TEMPLATES
+        }, prog);
         sheets = r.sheets;
-        autoLog(`AI ใช้ token: input ${r.usage.input.toLocaleString()} · output ${r.usage.output.toLocaleString()}`);
-        sheets.forEach((s) => (s.notes || []).forEach((n) => autoLog(`  Sheet ${s.sheet}: ${n}`)));
+        info = { model: model, usage: r.usage, cost: r.cost, failed: r.failed, cached: r.cached };
+        autoLog(`AI ใช้ token: input ${r.usage.input.toLocaleString()} · output ${r.usage.output.toLocaleString()} · ค่าใช้จ่ายรอบนี้ ≈ $${r.cost.toFixed(2)}` + (r.cached ? ` · ใช้ผลเดิม ${r.cached} หน้า (ไม่เสียค่าใช้จ่าย)` : ''));
+        if (r.failed.length) autoLog(`⚠ อ่านไม่สำเร็จ ${r.failed.length} หน้า: ${r.failed.map((f) => f.page).join(', ')} — กดรันอีกครั้งเพื่ออ่านเฉพาะหน้าที่เหลือ`);
       }
-      autoLog('รวม node ข้ามหน้าและคัดสายภายในตู้…', 0.82);
+      if (method === 'B') sheets.forEach((s) => (s.notes || []).forEach((n) => autoLog(`  Sheet ${s.sheet}: ${n}`)));
+      if (!sheets.length) throw new Error('ไม่มีหน้าที่อ่านสำเร็จ');
+      autoLog('รวม node ข้ามหน้าและคัดสายภายในตู้…', 0.8);
       const merged = A.mergeSheets(sheets, { cabinets: cabinets });
+      // cross-check the AI against the free offline reading
+      if (method === 'B' && $('#aCross').checked) {
+        autoLog('ตรวจไขว้กับวิธี A…', 0.82);
+        const sa = await A.readSheetsA(pdfDoc, sheets.map((s) => +s.sheet), window.pdfjsLib.OPS, window.GLYPH_TEMPLATES);
+        const cross = A.crossCheck(merged.nets, A.mergeSheets(sa, { cabinets: cabinets }).nets);
+        merged.nets.forEach((n, i) => { n.cross = cross[i]; });
+        const bad = cross.filter((c) => c.split || c.joined).length;
+        autoLog(`  node ที่วิธี A อ่านต่างจาก AI: ${bad} จาก ${merged.nets.length}`);
+      }
       const outlines = [];
       const multi = cabinets.length > 1;
       for (const c of cabs) {
         const L = c.loc.replace(/^\+/, '').replace(/\.$/, '').toUpperCase();
         const wanted = Array.from(merged.devices.entries()).filter(([, d]) => d.loc.replace(/\.$/, '') === L).map(([k]) => k);
         for (const pg of A.parsePages(c.outline, pdfDoc.numPages)) {
-          autoLog(`อ่าน Outline หน้า ${pg} (${c.loc})…`, 0.86);
+          autoLog(`อ่าน Outline หน้า ${pg} (${c.loc})…`, 0.88);
           const o = await A.readOutline(pdfDoc, pg, window.pdfjsLib.OPS, window.GLYPH_TEMPLATES, wanted);
           o.loc = multi ? L + '.' : c.loc;
           outlines.push(o);
           autoLog(`  พบตำแหน่งอุปกรณ์ ${Object.keys(o.positions).length}/${wanted.length} · รางวายเวย์ ${o.wireways.length}`);
         }
       }
-      autoResult = { method: method, pages: pages, cabs: cabs, sheets: sheets, merged: merged, outlines: outlines, exclude: new Set() };
+      autoResult = { method: method, pages: sheets.map((s) => +s.sheet), cabs: cabs, sheets: sheets, merged: merged, outlines: outlines, exclude: new Set(), info: info };
       autoLog(`เสร็จใน ${((Date.now() - t0) / 1000).toFixed(1)} วินาที`, 1);
       renderAutoReview();
     } catch (err) {
@@ -1221,7 +1254,26 @@
       autoLog('ผิดพลาด: ' + (err && err.message ? err.message : err));
       toast('รันไม่สำเร็จ: ' + (err && err.message ? err.message : err), 7000);
     }
-    $('#aRun').disabled = false;
+    $('#aRun').disabled = false; $('#aCancel').hidden = true; autoAbort = null;
+  }
+  function saveReading() {
+    const r = autoResult; if (!r) return;
+    const out = { app: 'internal-wiring-planner/reading', version: 1, pdfName: pdfName, pdfKey: pdfKey(), method: r.method, pages: r.pages, cabs: r.cabs, info: r.info, sheets: r.sheets, savedAt: new Date().toISOString() };
+    const blob = new Blob([JSON.stringify(out)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${pdfName.replace(/\.pdf$/i, '') || 'reading'}_read_${r.method}${r.info && r.info.model ? '_' + r.info.model.replace(/^claude-/, '') : ''}.json`;
+    a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }
+  async function loadReading(file) {
+    let d;
+    try { d = JSON.parse(await file.text()); } catch (e) { toast('อ่านไฟล์ไม่ได้'); return; }
+    if (!d || d.app !== 'internal-wiring-planner/reading' || !Array.isArray(d.sheets)) { toast('ไม่ใช่ไฟล์ผลการอ่านของโปรแกรมนี้'); return; }
+    if (!pdfDoc) { toast(`เปิด PDF ${d.pdfName || ''} ก่อน แล้วโหลดผลการอ่านอีกครั้ง`, 6000); return; }
+    if (d.pdfKey && d.pdfKey !== pdfKey() && !confirm(`ไฟล์ผลการอ่านมาจาก ${d.pdfName} ซึ่งไม่ตรงกับ PDF ที่เปิดอยู่ — ใช้ต่อหรือไม่?`)) return;
+    if (Array.isArray(d.cabs) && d.cabs.length) renderAutoCabs(d.cabs);
+    $('#aSch').value = d.pages.length ? `${d.pages[0]}-${d.pages[d.pages.length - 1]}` : '';
+    await runAuto({ method: d.method, pages: d.pages, sheets: d.sheets, info: d.info });
   }
   function netFlags(n) {
     const f = [];
@@ -1230,6 +1282,8 @@
     if (n.remark && /ชื่อขั้ว/.test(n.remark)) f.push('เบอร์สายเดาจากชื่อขั้ว');
     if (n.pins.length === 2 && n.pins.every((p) => /^(\+[A-Z0-9]+)?-(TB|X)/i.test(p[0]))) f.push('มีแต่ขั้ว Terminal');
     if (n.pins.some((p) => !/^(\+[A-Z0-9]+)?-[A-Z0-9]/i.test(p[0]))) f.push('ชื่ออุปกรณ์ผิดรูปแบบ');
+    if (n.cross && n.cross.split) f.push('วิธี A แยกเป็นหลาย node');
+    if (n.cross && n.cross.joined) f.push('วิธี A ต่อกับ node อื่น');
     return f;
   }
   function renderAutoReview() {
@@ -1239,7 +1293,8 @@
     const devs = Array.from(r.merged.devices.keys());
     const unplaced = devs.filter((k) => !placedKeys.has(k));
     $('#aCards').innerHTML = [
-      ['วิธีอ่าน', r.method === 'A' ? 'A · ออฟไลน์' : 'B · AI', `${r.pages.length} หน้า Schematic`],
+      ['วิธีอ่าน', r.method === 'A' ? 'A · ออฟไลน์' : 'B · AI', `${r.pages.length} หน้า Schematic` +
+        (r.method === 'B' && r.info ? ` · ≈ $${(r.info.cost || 0).toFixed(2)}` + ((r.info.failed || []).length ? ` · อ่านไม่สำเร็จ ${r.info.failed.length} หน้า` : '') : '')],
       ['node สายภายใน', nets.length, `${nets.reduce((s, n) => s + n.pins.length - 1, 0)} เส้นโดยประมาณ`],
       ['ควรตรวจ', flagged, 'ไม่มีเบอร์สาย / มีแต่ Terminal ฯลฯ'],
       ['อุปกรณ์', devs.length, `วางจาก Outline ได้ ${devs.length - unplaced.length} · ยังไม่วาง ${unplaced.length}`]
@@ -1308,7 +1363,10 @@
     });
     $$('input[name=aMethod]').forEach((r) => r.addEventListener('change', () => { $('#aAiBox').hidden = !$$('input[name=aMethod]').find((x) => x.value === 'B').checked; updateCost(); }));
     ['#aSch', '#aModel'].forEach((s) => $(s).addEventListener('input', updateCost));
-    $('#aRun').addEventListener('click', runAuto);
+    $('#aRun').addEventListener('click', () => runAuto());
+    $('#aCancel').addEventListener('click', () => { if (autoAbort) { autoAbort.abort(); autoLog('กำลังหยุด…'); } });
+    $('#aSaveRead').addEventListener('click', saveReading);
+    $('#aLoadRead').addEventListener('change', async (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) await loadReading(f); });
     $('#aApply').addEventListener('click', applyAuto);
     $('#aOnlyFlag').addEventListener('change', renderAutoReview);
     $('#aNets').addEventListener('change', (e) => {

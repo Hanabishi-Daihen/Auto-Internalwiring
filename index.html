@@ -69,11 +69,16 @@
             <option value="claude-opus-5-5">Claude Opus 5.5 (แม่นที่สุด)</option>
             <option value="claude-sonnet-5-5">Claude Sonnet 5.5 (ถูกกว่า)</option>
           </select></label>
+          <label class="chk"><input type="checkbox" id="aHints" checked> ส่งข้อความที่อ่านได้จากเส้น vector (วิธี A) ไปช่วย AI อ่านตัวอักษรเล็ก</label>
+          <label class="chk"><input type="checkbox" id="aCross" checked> ตรวจไขว้กับวิธี A (ฟรี) — แสดง node ที่สองวิธีอ่านไม่ตรงกัน</label>
           <p class="note" id="aCost"></p>
+          <p class="note">หน้าที่อ่านสำเร็จแล้วถูกเก็บไว้ในเบราว์เซอร์ — รันซ้ำ (เช่นหลังบางหน้าผิดพลาด) จะไม่เสียค่าอ่านหน้านั้นอีก</p>
           <p class="note">ภาพแบบจะถูกส่งไปประมวลผลที่ Anthropic — ตรวจนโยบายความลับของบริษัท/ลูกค้าก่อนใช้</p>
         </div>
         <div class="rowbtn" style="margin-top:12px">
           <button class="btn primary" id="aRun">▶ รันอ่านแบบและสร้าง Internal wiring</button>
+          <button class="btn" id="aCancel" hidden>■ หยุด</button>
+          <label class="btn ghost"><input type="file" id="aLoadRead" accept=".json,application/json" hidden>📂 โหลดผลการอ่าน</label>
         </div>
         <div class="progress" id="aProg" hidden><div class="bar" id="aBar"></div></div>
         <pre class="log" id="aLog"></pre>
@@ -90,7 +95,8 @@
       <div class="tablewrap" style="max-height:52vh"><table class="grid" id="aNets"></table></div>
       <div class="rowbtn" style="margin-top:10px">
         <button class="btn primary" id="aApply">✔ สร้างโปรเจกต์จากผลนี้</button>
-        <span class="hint">จะแทนที่โปรเจกต์ปัจจุบัน (กด 💾 บันทึกโปรเจกต์ ไว้ก่อนถ้าต้องการ) — แก้ไขต่อได้ในแท็บ Netlist / ผังอุปกรณ์</span>
+        <button class="btn" id="aSaveRead">💾 บันทึกผลการอ่าน (.json)</button>
+        <span class="hint">ผลการอ่านใช้ส่งต่อ/เปิดดูภายหลังได้โดยไม่ต้องอ่านแบบใหม่ · สร้างโปรเจกต์จะแทนที่โปรเจกต์ปัจจุบัน (กด 💾 บันทึกโปรเจกต์ ไว้ก่อนถ้าต้องการ) — แก้ไขต่อได้ในแท็บ Netlist / ผังอุปกรณ์</span>
       </div>
     </div>
   </section>

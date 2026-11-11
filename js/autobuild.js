@@ -113,53 +113,128 @@
     return out;
   }
 
+  const PRICE = { 'claude-opus-5-5': [4, 20], 'claude-sonnet-5-5': [2, 10] };   // USD per million tokens (input, output)
+  const B_VERSION = 2;                                                           // bump when the prompt changes (cache key)
+  function costOf(usage, model) { const p = PRICE[model] || PRICE['claude-opus-5-5']; return (usage.input * p[0] + usage.output * p[1]) / 1e6; }
+
+  /** words method A reads from the vector strokes, as hints for the AI: "text@x,y" with x,y in % of the page */
+  async function textHints(page, OPS, templates) {
+    if (!root.PdfVec || !root.GlyphOCR || !templates) return '';
+    const vp = page.getViewport({ scale: 1 });
+    const vec = await root.PdfVec.extractPaths(page, OPS);
+    const ocr = root.GlyphOCR.readPage(vec.paths, new root.GlyphOCR.Reader(templates));
+    const words = ocr.words.concat(await textTokens(page))
+      .filter((w) => w.text.length >= 1 && !/^[?]+$/.test(w.text))
+      .map((w) => `${w.text}@${Math.round(((w.bbox[0] + w.bbox[2]) / 2) / vp.width * 1000) / 10},${Math.round(((w.bbox[1] + w.bbox[3]) / 2) / vp.height * 1000) / 10}`);
+    return words.slice(0, 2500).join(' ');
+  }
+
+  function parseAnswer(msg, pg) {
+    if (msg.stop_reason === 'refusal') throw new Error(`Sheet ${pg}: AI ปฏิเสธการอ่าน (${(msg.stop_details && msg.stop_details.category) || ''})`);
+    if (msg.stop_reason === 'max_tokens') throw new Error(`Sheet ${pg}: คำตอบยาวเกินกำหนด`);
+    // after a server-side fallback, partial text of the declined attempt precedes a 'fallback' block
+    const lastFb = msg.content.map((b) => b.type).lastIndexOf('fallback');
+    const txt = msg.content.slice(lastFb + 1).filter((b) => b.type === 'text').map((b) => b.text).join('');
+    try { return JSON.parse(txt); } catch (e) { throw new Error(`Sheet ${pg}: อ่านผล JSON ไม่ได้`); }
+  }
+  function usageOf(msg) {
+    // usage.iterations covers every attempt (a declined attempt plus the fallback); top-level usage only the last
+    const it = (msg.usage && msg.usage.iterations) || null;
+    const list = it && it.length ? it : [msg.usage || {}];
+    return list.reduce((u, x) => ({ input: u.input + (x.input_tokens || 0) + (x.cache_read_input_tokens || 0) + (x.cache_creation_input_tokens || 0), output: u.output + (x.output_tokens || 0) }), { input: 0, output: 0 });
+  }
+  function sheetFromAnswer(data, pg) {
+    return {
+      sheet: pad2(pg), method: 'B', notes: data.notes || [],
+      nodes: (data.nodes || []).map((n) => ({
+        sheet: pad2(pg), wire: (n.wire || '').trim(), xrefs: n.continues || [], terms: [],
+        pins: (n.points || []).filter((p) => p && p.device).map((p) => ({ dev: p.device.trim(), pin: String(p.pin).trim(), loc: (p.cabinet || '').trim() }))
+      }))
+    };
+  }
+
+  /**
+   * Method B: Claude reads each sheet image.
+   * opts: {apiKey, model, effort, cabinets, signal, cache:{get(key), set(key, value)}, fileKey, hints, OPS, templates}
+   * A page that fails is reported in `failed` and the run goes on; pages already read come from the cache
+   * (a re-run does not pay for them again). Cancelling (signal) stops at once.
+   */
   async function readSheetsB(pdfDoc, pages, opts, onProgress) {
     if (!root.Anthropic) throw new Error('ไม่พบไลบรารี Anthropic SDK');
-    const client = new root.Anthropic({ apiKey: opts.apiKey, dangerouslyAllowBrowser: true });
-    const sheets = [];
+    const client = new root.Anthropic({ apiKey: opts.apiKey, dangerouslyAllowBrowser: true, maxRetries: 3 });
+    const model = opts.model || 'claude-opus-5-5';
+    const sheets = [], failed = [];
     const usage = { input: 0, output: 0 };
+    let cached = 0;
     for (let i = 0; i < pages.length; i++) {
       const pg = pages[i];
-      onProgress && onProgress(`AI อ่าน Sheet ${pg} (${i + 1}/${pages.length})`, i / pages.length);
-      const page = await pdfDoc.getPage(pg);
-      const imgs = await pageImages(page, 1500);
-      const stream = client.beta.messages.stream({
-        model: opts.model || 'claude-opus-5-5',
-        max_tokens: 32000,
-        betas: ['server-side-fallback-2026-07-01'],
-        fallbacks: 'default',
-        output_config: { effort: opts.effort || 'high', format: { type: 'json_schema', schema: AI_SCHEMA } },
-        system: AI_SYSTEM,
-        messages: [{
-          role: 'user',
-          content: [
-            { type: 'text', text: `Sheet ${pg} of the schematic, left half:` },
-            { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: imgs[0] } },
-            { type: 'text', text: 'Right half (the halves overlap slightly):' },
-            { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: imgs[1] } },
-            { type: 'text', text: `Cabinet(s) being wired: ${opts.cabinets.join(', ')}. List all electrical nodes on this sheet.` }
-          ]
-        }]
-      });
-      const msg = await stream.finalMessage();
-      usage.input += (msg.usage && msg.usage.input_tokens) || 0;
-      usage.output += (msg.usage && msg.usage.output_tokens) || 0;
-      if (msg.stop_reason === 'refusal') throw new Error(`Sheet ${pg}: AI ปฏิเสธการอ่าน (${(msg.stop_details && msg.stop_details.category) || ''})`);
-      if (msg.stop_reason === 'max_tokens') throw new Error(`Sheet ${pg}: คำตอบยาวเกินกำหนด`);
-      // after a server-side fallback, partial text of the declined attempt precedes a 'fallback' block
-      const lastFb = msg.content.map((b) => b.type).lastIndexOf('fallback');
-      const txt = msg.content.slice(lastFb + 1).filter((b) => b.type === 'text').map((b) => b.text).join('');
-      let data;
-      try { data = JSON.parse(txt); } catch (e) { throw new Error(`Sheet ${pg}: อ่านผล JSON ไม่ได้`); }
-      sheets.push({
-        sheet: pad2(pg), method: 'B', notes: data.notes || [],
-        nodes: (data.nodes || []).map((n) => ({
-          sheet: pad2(pg), wire: n.wire || '', xrefs: n.continues || [], terms: [],
-          pins: (n.points || []).map((p) => ({ dev: p.device.trim(), pin: String(p.pin).trim(), loc: (p.cabinet || '').trim() }))
-        }))
-      });
+      if (opts.signal && opts.signal.aborted) throw new Error('ยกเลิกแล้ว');
+      const key = `${opts.fileKey || ''}|${pg}|${model}|${opts.hints ? 'h' : ''}|v${B_VERSION}`;
+      const hit = opts.cache && opts.cache.get(key);
+      if (hit) {
+        sheets.push(sheetFromAnswer(hit, pg)); cached++;
+        onProgress && onProgress(`Sheet ${pg} (${i + 1}/${pages.length}) ใช้ผลที่อ่านไว้แล้ว`, (i + 1) / pages.length);
+        continue;
+      }
+      onProgress && onProgress(`AI อ่าน Sheet ${pg} (${i + 1}/${pages.length})…`, i / pages.length);
+      try {
+        const page = await pdfDoc.getPage(pg);
+        const imgs = await pageImages(page, 1500);
+        const content = [
+          { type: 'text', text: `Sheet ${pg} of the schematic, left half:` },
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: imgs[0] } },
+          { type: 'text', text: 'Right half (the halves overlap slightly):' },
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: imgs[1] } }
+        ];
+        if (opts.hints) {
+          const h = await textHints(page, opts.OPS, opts.templates);
+          if (h) content.push({ type: 'text', text: 'Text machine-read from the drawing\'s vector strokes, as text@x%,y% of the full page (x from the left, y from the top). It is often right but can confuse similar characters (8/B, 0/O, 5/S) and misses some items; trust the image when they disagree:\n' + h });
+        }
+        content.push({ type: 'text', text: `Cabinet(s) being wired: ${opts.cabinets.join(', ')}. List all electrical nodes on this sheet.` });
+        const stream = client.beta.messages.stream({
+          model: model,
+          max_tokens: 32000,
+          betas: ['server-side-fallback-2026-07-01'],
+          fallbacks: 'default',
+          output_config: { effort: opts.effort || 'high', format: { type: 'json_schema', schema: AI_SCHEMA } },
+          system: AI_SYSTEM,
+          messages: [{ role: 'user', content: content }]
+        }, { signal: opts.signal });
+        const msg = await stream.finalMessage();
+        const u = usageOf(msg);
+        usage.input += u.input; usage.output += u.output;
+        const data = parseAnswer(msg, pg);
+        if (opts.cache) opts.cache.set(key, data);
+        sheets.push(sheetFromAnswer(data, pg));
+        onProgress && onProgress(`  Sheet ${pg}: ${(data.nodes || []).length} node · ~$${costOf(u, model).toFixed(2)}`, (i + 1) / pages.length);
+      } catch (err) {
+        if (opts.signal && opts.signal.aborted) throw new Error('ยกเลิกแล้ว');
+        const m = (err && err.status ? `HTTP ${err.status} ` : '') + (err && err.message ? err.message : String(err));
+        if (err && (err.status === 401 || err.status === 403)) throw new Error('API key ใช้ไม่ได้ (' + m + ')');
+        failed.push({ page: pg, error: m });
+        onProgress && onProgress(`  Sheet ${pg}: อ่านไม่สำเร็จ — ${m}`, (i + 1) / pages.length);
+      }
     }
-    return { sheets: sheets, usage: usage };
+    return { sheets: sheets, usage: usage, cost: costOf(usage, model), failed: failed, cached: cached };
+  }
+
+  /**
+   * Cross-check two readings of the same sheets (e.g. AI against offline). For each node of `main`:
+   * 'split'  - the other reading puts two of its pins on different nodes
+   * 'joined' - the other reading joins one of its pins to a pin of another node
+   * Pins the other reading did not find are not judged.
+   */
+  function crossCheck(mainNets, otherNets) {
+    const where = new Map();
+    otherNets.forEach((n, i) => n.pins.forEach((p) => where.set(p[0] + '@' + p[1], i)));
+    const mainOf = new Map();
+    mainNets.forEach((n, i) => n.pins.forEach((p) => mainOf.set(p[0] + '@' + p[1], i)));
+    return mainNets.map((n, i) => {
+      const ids = n.pins.map((p) => where.get(p[0] + '@' + p[1])).filter((x) => x !== undefined);
+      const res = { known: ids.length, split: new Set(ids).size > 1, joined: false };
+      for (const k of new Set(ids)) for (const p of otherNets[k].pins) { const m = mainOf.get(p[0] + '@' + p[1]); if (m !== undefined && m !== i) res.joined = true; }
+      return res;
+    });
   }
 
   // ---------------------------------------------------------------- merge sheets -> internal nets
@@ -330,7 +405,7 @@
     return { project: P, placed: placed };
   }
 
-  const api = { parsePages: parsePages, readSheetsA: readSheetsA, readSheetsB: readSheetsB, mergeSheets: mergeSheets, readOutline: readOutline, buildProject: buildProject, AI_SCHEMA: AI_SCHEMA };
+  const api = { parsePages: parsePages, readSheetsA: readSheetsA, readSheetsB: readSheetsB, crossCheck: crossCheck, costOf: costOf, PRICE: PRICE, mergeSheets: mergeSheets, readOutline: readOutline, buildProject: buildProject, AI_SCHEMA: AI_SCHEMA };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.AutoBuild = api;
 })(typeof window !== 'undefined' ? window : this);
