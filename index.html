@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Internal Wiring Planner</title>
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <div class="logo" aria-hidden="true">⚡</div>
+    <div>
+      <div class="app-name">Internal Wiring Planner</div>
+      <div class="proj" id="projTitle">-</div>
+    </div>
+  </div>
+  <div class="actions">
+    <label class="btn ghost" title="เปิดไฟล์ Schematic PDF เพื่อดูแบบ / ดึงตำแหน่งจาก Outline">
+      <input type="file" id="pdfFile" accept="application/pdf" hidden>📄 เปิด PDF
+    </label>
+    <label class="btn ghost" title="โหลดโปรเจกต์ (.json)">
+      <input type="file" id="projFile" accept=".json,application/json" hidden>📂 โหลดโปรเจกต์
+    </label>
+    <button class="btn ghost" id="btnSaveProj" title="บันทึกโปรเจกต์ทั้งหมดเป็น .json">💾 บันทึกโปรเจกต์</button>
+    <button class="btn primary" id="btnExcel" title="ส่งออก Internal wiring list ตามฟอร์ม Excel">⬇ ส่งออก Excel</button>
+  </div>
+</header>
+
+<nav class="tabs" role="tablist">
+  <button class="tab active" data-tab="overview">ภาพรวม</button>
+  <button class="tab" data-tab="wires">รายการสาย (Wiring list)</button>
+  <button class="tab" data-tab="layout">ผังอุปกรณ์ (Outline)</button>
+  <button class="tab" data-tab="nets">Netlist จาก Schematic</button>
+  <button class="tab" data-tab="pdf">ดูแบบ PDF</button>
+  <button class="tab" data-tab="settings">ตั้งค่า</button>
+</nav>
+
+<main>
+  <!-- ============================ OVERVIEW -->
+  <section class="panel active" id="tab-overview">
+    <div class="cards" id="statCards"></div>
+    <div class="grid2">
+      <div class="box">
+        <h3>ขั้นตอนใช้งาน</h3>
+        <ol class="steps">
+          <li><b>ตรวจ Netlist</b> — แท็บ <i>Netlist จาก Schematic</i> คือจุดต่อทุก node ที่อ่านจากแบบ Sheet 07–22 แก้ไข/เพิ่มได้ เปิด PDF เทียบได้ในแท็บ <i>ดูแบบ PDF</i></li>
+          <li><b>ตรวจตำแหน่งอุปกรณ์</b> — แท็บ <i>ผังอุปกรณ์</i> แสดงอุปกรณ์บน Outline Sheet 30 ลากย้ายได้ อุปกรณ์ที่ไม่มีใน Outline จะมีกรอบสีส้ม (ตำแหน่งสมมติ)</li>
+          <li><b>จัดเส้นทางสาย</b> — โปรแกรมเรียงลำดับการพ่วงสายในแต่ละ node ให้สั้นที่สุดตามรางวายเวย์ ประตู (hinge) และผนังข้าง โดยแต่ละขาอุปกรณ์มีสายไม่เกิน 2 เส้น</li>
+          <li><b>ส่งออก Excel</b> — ได้ชีท IN TCC ตามฟอร์มเดิม + Short link, Bundle, Cut list, Notes</li>
+        </ol>
+      </div>
+      <div class="box">
+        <h3>จุดในแบบที่ควรตรวจสอบ</h3>
+        <ul class="warnlist" id="anomalyList"></ul>
+      </div>
+    </div>
+    <div class="box">
+      <h3>ความยาวสายแยกตามกลุ่มเส้นทาง (Bundle)</h3>
+      <div id="bundleTable"></div>
+    </div>
+  </section>
+
+  <!-- ============================ WIRE LIST -->
+  <section class="panel" id="tab-wires">
+    <div class="toolbar">
+      <input type="search" id="wSearch" placeholder="ค้นหา เบอร์สาย / อุปกรณ์ / ขั้ว เช่น P1, -K5, TB03">
+      <select id="wSheet"><option value="">ทุก Sheet</option></select>
+      <select id="wSort">
+        <option value="sheet">เรียงตามแบบ (Sheet / เบอร์สาย)</option>
+        <option value="work">เรียงตามพื้นที่ทำงาน (Bundle)</option>
+        <option value="device">เรียงตามอุปกรณ์ต้นทาง</option>
+      </select>
+      <label class="chk"><input type="checkbox" id="wBlank"> เฉพาะสายที่ยังไม่ระบุสี/ขนาด</label>
+      <label class="chk"><input type="checkbox" id="wRemark"> เฉพาะที่มีหมายเหตุ</label>
+      <span class="count" id="wCount"></span>
+    </div>
+    <div class="split">
+      <div class="tablewrap" id="wireTableWrap"><table class="grid" id="wireTable"></table></div>
+      <div class="mapwrap">
+        <canvas id="miniMap"></canvas>
+        <div class="maplegend" id="miniInfo">คลิกแถวในตารางเพื่อดูเส้นทางสายบนผัง</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ LAYOUT -->
+  <section class="panel" id="tab-layout">
+    <div class="toolbar">
+      <label class="chk"><input type="checkbox" id="lEdit"> โหมดแก้ไขตำแหน่ง (ลากอุปกรณ์)</label>
+      <label class="chk"><input type="checkbox" id="lWire" checked> แสดงรางวายเวย์</label>
+      <label class="chk"><input type="checkbox" id="lAll"> แสดงสายทั้งหมด</label>
+      <select id="lNet"><option value="">— เลือกเบอร์สายเพื่อไฮไลต์ —</option></select>
+      <button class="btn small" id="lFit">พอดีจอ</button>
+      <button class="btn small" id="lExtract" title="ต้องเปิด PDF ก่อน">ดึงตำแหน่งจาก PDF (Outline)</button>
+      <span class="hint">ล้อเมาส์ = ซูม · ลากพื้นหลัง = เลื่อน</span>
+    </div>
+    <div class="split layoutsplit">
+      <div class="mapwrap big"><canvas id="layoutMap"></canvas></div>
+      <div class="side">
+        <h3>อุปกรณ์</h3>
+        <input type="search" id="dSearch" placeholder="ค้นหาอุปกรณ์">
+        <div class="devlist" id="devList"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ NETLIST -->
+  <section class="panel" id="tab-nets">
+    <div class="toolbar">
+      <input type="search" id="nSearch" placeholder="ค้นหา node / อุปกรณ์">
+      <select id="nSheet"><option value="">ทุก Sheet</option></select>
+      <button class="btn small" id="nAdd">+ เพิ่ม node</button>
+      <button class="btn small ghost" id="nCsvOut">ส่งออก Netlist CSV</button>
+      <label class="btn small ghost"><input type="file" id="nCsvIn" accept=".csv,text/csv" hidden>นำเข้า Netlist CSV</label>
+      <span class="count" id="nCount"></span>
+    </div>
+    <p class="note">รูปแบบขา: <code>อุปกรณ์:ขา</code> คั่นด้วยช่องว่าง เช่น <code>-8A1:2 -CONL:L -43HL:2</code> · ขาที่อยู่ Sheet อื่นเติม <code>@Sheet</code> เช่น <code>-27L:A1@09</code> · <code>GND</code> = บาร์กราวด์ · ช่อง “ล็อกช่วง” ใช้บังคับคู่สายตามแบบ เช่น <code>-TB03:121&gt;-8FM1:1.11</code></p>
+    <div class="tablewrap tall"><table class="grid" id="netTable"></table></div>
+  </section>
+
+  <!-- ============================ PDF -->
+  <section class="panel" id="tab-pdf">
+    <div class="toolbar">
+      <button class="btn small" id="pPrev">◀</button>
+      <select id="pPage"></select>
+      <button class="btn small" id="pNext">▶</button>
+      <button class="btn small" id="pZoomOut">−</button>
+      <span id="pZoom">100%</span>
+      <button class="btn small" id="pZoomIn">+</button>
+      <span class="hint" id="pInfo">ยังไม่ได้เปิดไฟล์ PDF — กดปุ่ม “📄 เปิด PDF” ด้านบน</span>
+    </div>
+    <div class="pdfwrap" id="pdfWrap"><canvas id="pdfCanvas"></canvas></div>
+  </section>
+
+  <!-- ============================ SETTINGS -->
+  <section class="panel" id="tab-settings">
+    <div class="grid2">
+      <div class="box">
+        <h3>ข้อมูลหัวกระดาษ (Header / Footer)</h3>
+        <div class="form" id="metaForm"></div>
+      </div>
+      <div class="box">
+        <h3>การคำนวณ</h3>
+        <div class="form">
+          <label>วิธีจัดลำดับการพ่วงสาย
+            <select id="sMode">
+              <option value="opt">ปรับให้สั้นที่สุดตามผังอุปกรณ์ (แนะนำ)</option>
+              <option value="drawing">ตามลำดับที่เขียนในแบบ</option>
+            </select>
+          </label>
+          <label>เผื่อปลายสายต่อปลาย (mm)<input type="number" id="sAllow" min="0" step="10"></label>
+          <label>ปัดความยาวตัดสายขึ้นทีละ (mm)<input type="number" id="sRound" min="1" step="10"></label>
+        </div>
+        <h3>ตารางสี/ขนาดสาย (Sheet 03 — Cable for wiring)</h3>
+        <div id="cableTable"></div>
+        <h3>ข้อมูลโปรเจกต์</h3>
+        <div class="rowbtn">
+          <button class="btn small ghost" id="btnReset">รีเซ็ตเป็นข้อมูลตั้งต้นของโปรเจกต์</button>
+        </div>
+        <p class="note">การแก้ไขทั้งหมดถูกบันทึกอัตโนมัติในเบราว์เซอร์นี้ ใช้ “💾 บันทึกโปรเจกต์” เพื่อเก็บเป็นไฟล์และส่งต่อให้ผู้อื่น</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div class="modal" id="modal" hidden>
+  <div class="modal-card">
+    <h3 id="modalTitle"></h3>
+    <div id="modalBody"></div>
+    <div class="modal-actions" id="modalActions"></div>
+  </div>
+</div>
+<div class="toast" id="toast" hidden></div>
+
+<script src="vendor/pdf.min.js"></script>
+<script src="vendor/exceljs.min.js"></script>
+<script src="data/pp1047a_tcc.js"></script>
+<script src="js/engine.js"></script>
+<script src="js/export.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
