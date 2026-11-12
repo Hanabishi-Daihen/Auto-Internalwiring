@@ -8,6 +8,7 @@
 (function (root) {
   'use strict';
 
+  const T_JOIN = false;      // joining T-junctions without a dot was tried: precision fell from 99% to 80% on PP1047A
   const RX = {
     device: /^-[A-Z0-9][A-Z0-9.\-]*$/,
     xref: /^\/\d{1,2}\.[A-I]\d{1,2}$/,
@@ -208,7 +209,10 @@
             // T-joint only with a junction dot; a collinear overlap (wire drawn over a symbol lead) is one line
             const ax = s[2] - s[0], ay = s[3] - s[1], bx = t[2] - t[0], by = t[3] - t[1];
             const collinear = Math.abs(ax * by - ay * bx) < 1e-3 * Math.hypot(ax, ay) * Math.hypot(bx, by);
-            if (collinear || dotAt(x, y)) u(i, j);
+            // a T: the end of one wire on the middle of another is a connection by convention (dots are optional at
+            // a T, needed only where lines cross); only a free end (nothing else meets it) of a real wire counts
+            const freeEnd = (degree.get(key(x, y)) || 0) === 1 && Math.hypot(s[2] - s[0], s[3] - s[1]) > 2 && Math.hypot(t[2] - t[0], t[3] - t[1]) > 4;
+            if (collinear || dotAt(x, y) || (T_JOIN && freeEnd)) u(i, j);
           }
         }
       }
