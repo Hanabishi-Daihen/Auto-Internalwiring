@@ -377,6 +377,34 @@
       });
       if (b) { a.text = a.text + '.' + b.text; a.bbox = [a.bbox[0], Math.min(a.bbox[1], b.bbox[1]), b.bbox[2], Math.max(a.bbox[3], b.bbox[3])]; a.members = a.members.concat(b.members); b.dead = true; a.joined = true; }
     }
+    // numbers split by a dot (1.12 written sideways): '1' + dot + '12' -> '1.12'
+    for (const it of items) {
+      if (it.kind !== 'dot' || it.used) continue;
+      const cx = (it.bbox[0] + it.bbox[2]) / 2, cy = (it.bbox[1] + it.bbox[3]) / 2;
+      // reading position along the text and offset across it, per rotation
+      const along = (r, x, y) => (r === 0 ? x : r === 1 ? -y : y), across = (r, x, y) => (r === 0 ? y : x);
+      let pair = null;
+      for (const a of words) {
+        if (a.dead || a.joined || !/^\d{1,2}$/.test(a.text)) continue;
+        const r = a.rot, A = a.bbox, H = a.H;
+        const aEnd = r === 0 ? A[2] : r === 1 ? -A[1] : A[3];
+        const base = r === 0 ? A[3] : r === 1 ? A[2] : A[0];
+        const d = along(r, cx, cy) - aEnd;
+        if (d < -0.1 || d > 0.6 * H || Math.abs(across(r, cx, cy) - base) > 0.3 * H) continue;
+        const b = words.find((x) => {
+          if (x === a || x.dead || x.rot !== r || !/^\d{1,2}$/.test(x.text)) return false;
+          const B = x.bbox, bStart = r === 0 ? B[0] : r === 1 ? -B[3] : B[1], bBase = r === 0 ? B[3] : r === 1 ? B[2] : B[0];
+          const g = bStart - along(r, cx, cy);
+          return g > -0.1 && g < 0.6 * H && Math.abs(bBase - base) < 0.3 * H;
+        });
+        if (b) { pair = [a, b]; break; }
+      }
+      if (!pair) continue;
+      const [a, b] = pair;
+      a.text = a.text + '.' + b.text;
+      a.bbox = [Math.min(a.bbox[0], b.bbox[0]), Math.min(a.bbox[1], b.bbox[1]), Math.max(a.bbox[2], b.bbox[2]), Math.max(a.bbox[3], b.bbox[3])];
+      a.members = a.members.concat(b.members); b.dead = true; a.joined = true; it.used = true;
+    }
     for (let k = words.length - 1; k >= 0; k--) if (words[k].dead) words.splice(k, 1);
     for (const w of words) {
       if (w.joined) { w.text = w.prefix + w.text; w.chars = w.members.map((i) => chars[i]); delete w.members; continue; }

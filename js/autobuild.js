@@ -279,6 +279,13 @@
       if (items[reps[0]].nd.wire.length === 1 && !reps.some(one)) continue;
       for (let k = 1; k < reps.length; k++) par[f(reps[k])] = f(reps[0]);
     }
+    // a terminal joins the wire on each side of it: nodes on one sheet that share a terminal are one node
+    const termAt = new Map();
+    items.forEach((it, i) => (it.nd.terms || []).forEach((t) => {
+      if (!t.dev || !t.pin || /\?/.test(t.dev + t.pin)) return;
+      const k = it.sh + '|' + t.dev + ':' + t.pin + '|' + Math.round(t.x || 0) + ',' + Math.round(t.y || 0);   // the same circle, not the same name (many 'E')
+      if (termAt.has(k)) par[f(i)] = f(termAt.get(k)); else termAt.set(k, i);
+    }));
     const groups = new Map();
     items.forEach((it, i) => { const r = f(i); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(it); });
 
