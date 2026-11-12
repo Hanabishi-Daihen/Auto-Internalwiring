@@ -62,6 +62,15 @@
       // (and some device names: -AN on PP1047A sheet 18)
       const toks = await textTokens(page);
       ocr.realText = toks;                       // all real text, for cell captions (AN19 inside an annunciator cell)
+      // '+' drawn in strokes followed by real text 'LCC.' is the location label +LCC.
+      toks.forEach((t) => {
+        if (!/^[A-Z][A-Z0-9]{1,4}\.$/.test(t.text)) return;
+        const H = t.bbox[3] - t.bbox[1];
+        const plus = ocr.words.find((w) => w.text === '+' && w.bbox[2] <= t.bbox[0] + 0.5 && t.bbox[0] - w.bbox[2] < 1.5 * H &&
+          Math.abs((w.bbox[1] + w.bbox[3]) / 2 - (t.bbox[1] + t.bbox[3]) / 2) < H);
+        // a cabinet code with a dot written as real text (LCC., RCC., MDC.) is a location label even without its '+'
+        if (plus || (/^([A-Z]CC|MDC|MDU|MK)\.$/.test(t.text) && t.bbox[3] < 0.875 * vec.height)) t.text = '+' + t.text;
+      });
       toks.filter((t) => /^\+[A-Z][A-Z0-9]*\.?$/.test(t.text) || /^-[A-Z0-9][A-Z0-9.\-]*[A-Z0-9]$/.test(t.text))
         .forEach((t) => ocr.words.push({ text: t.text, rot: t.rot, bbox: t.bbox, H: t.rot ? t.bbox[2] - t.bbox[0] : t.bbox[3] - t.bbox[1], chars: [], prefix: t.text[0], src: 'text' }));
       const sh = root.SchematicReader.readSheet(vec, ocr, pad2(pg));
@@ -278,7 +287,8 @@
       const reps = Array.from(firstOn.values());
       if (reps.length < 2) continue;
       const one = (i) => ((items[i].nd.xrefs || []).length > 0);
-      if (items[reps[0]].nd.wire.length === 1 && !reps.some(one)) continue;
+      // a name without a digit (R, N, DC - often a truncated DC+.1) joins sheets only when a cross reference backs it
+      if (!/\d/.test(items[reps[0]].nd.wire) && !(reps.length === 2 && reps.every(one))) continue;
       for (let k = 1; k < reps.length; k++) par[f(reps[k])] = f(reps[0]);
     }
     // a terminal joins the wire on each side of it: nodes on one sheet that share a terminal are one node
@@ -292,6 +302,9 @@
     items.forEach((it, i) => { const r = f(i); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(it); });
 
     const nets = [], devices = new Map(), warnings = [];
+    // a sheet that draws a box for one of our cabinets puts every point of ours inside a box: a point outside all
+    // boxes is not ours (on a sheet with no cabinet box, everything is the default cabinet)
+    const cabSheet = new Set(sheets.filter((s) => (s.boxes || []).some((b) => cabs.indexOf(normLoc(b.text)) >= 0)).map((s) => s.sheet));
     let unnamed = 0;
     for (const g of groups.values()) {
       const pins = [], seen = new Set();
@@ -299,6 +312,7 @@
       for (const it of g) {
         for (const p of (it.nd.pins || []).concat(it.nd.terms || [])) {
           if (!p.dev || !p.pin || /\?/.test(p.dev + p.pin)) continue;
+          if (!p.loc && multi && cabSheet.has(it.sh)) { ext++; continue; }
           const L = normLoc(p.loc) || def;
           if (cabs.indexOf(L) < 0) { ext++; continue; }              // drawn inside +TR / +MCC ... -> external
           const key = (multi ? '+' + L : '') + p.dev;

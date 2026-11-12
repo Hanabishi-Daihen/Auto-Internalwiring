@@ -138,7 +138,17 @@
       // round symbols bigger than a terminal (motor, lamp, meter): their outline joins nothing, leads end on it
       if (pl.length >= 12 && Math.hypot(pl[0][0] - pl[pl.length - 1][0], pl[0][1] - pl[pl.length - 1][1]) < 0.05) {
         const w = p.bbox[2] - p.bbox[0], h = p.bbox[3] - p.bbox[1];
-        if (w > 6.5 && w < 45 && Math.abs(w - h) < 0.1 * w) { bodies.push(p.bbox); textPath.add(i); }
+        // smaller circles are terminals - unless crossed by an X (indicator lamp)
+        const crossed = () => paths.some((q, j) => j !== i && q.stroke && q.polys.some((ql) => ql.length === 2 &&
+          Math.abs(ql[1][0] - ql[0][0]) > 0.3 * w && Math.abs(ql[1][1] - ql[0][1]) > 0.3 * w &&
+          ql.every(([qx, qy]) => qx > p.bbox[0] - 0.3 && qx < p.bbox[2] + 0.3 && qy > p.bbox[1] - 0.3 && qy < p.bbox[3] + 0.3)));
+        if (w < 45 && Math.abs(w - h) < 0.1 * w && (w > 6.5 || (w > 3 && crossed()))) { bodies.push(p.bbox); textPath.add(i); }
+        return;
+      }
+      // a closed triangle (diode / LED): the lead drawn straight through it is cut at the symbol
+      if (pl.length === 4 && Math.hypot(pl[0][0] - pl[3][0], pl[0][1] - pl[3][1]) < 0.05) {
+        const w = p.bbox[2] - p.bbox[0], h = p.bbox[3] - p.bbox[1];
+        if (w > 2.5 && h > 2.5 && w < 20 && h < 20) { bodies.push(p.bbox); textPath.add(i); }
         return;
       }
       if (pl.length !== 5 || Math.hypot(pl[0][0] - pl[4][0], pl[0][1] - pl[4][1]) > 0.05) return;
@@ -218,7 +228,12 @@
             // a T: the end of one wire on the middle of another is a connection by convention (dots are optional at
             // a T, needed only where lines cross); only a free end (nothing else meets it) of a real wire counts
             const freeEnd = (degree.get(key(x, y)) || 0) === 1 && Math.hypot(s[2] - s[0], s[3] - s[1]) > 2 && Math.hypot(t[2] - t[0], t[3] - t[1]) > 4;
-            if (collinear || dotAt(x, y) || (T_JOIN && freeEnd)) u(i, j);
+            // a bus continued by a short 45-degree jog that starts on the middle of a drop line (PP0993B style)
+            const dx = Math.abs(s[2] - s[0]), dy = Math.abs(s[3] - s[1]), Ls = Math.hypot(dx, dy);
+            const other = Math.hypot(s[0] - x, s[1] - y) < EP ? [s[2], s[3]] : [s[0], s[1]];
+            const jog = Ls > 1.5 && Ls < 10 && Math.abs(dx - dy) < 0.25 * Ls && (degree.get(key(other[0], other[1])) || 0) >= 2 &&
+              (Math.abs(t[0] - t[2]) < 0.05 || Math.abs(t[1] - t[3]) < 0.05);
+            if (collinear || dotAt(x, y) || jog || (T_JOIN && freeEnd)) u(i, j);
           }
         }
       }

@@ -109,10 +109,25 @@
       Math.abs((p.bbox[2] - p.bbox[0]) - (p.bbox[3] - p.bbox[1])) < 0.2 * size(p))
       .map((p) => ({ x: (p.bbox[0] + p.bbox[2]) / 2, y: (p.bbox[1] + p.bbox[3]) / 2, r: (p.bbox[2] - p.bbox[0] + p.bbox[3] - p.bbox[1]) / 4 }));
     const onCircle = (q) => circles.some((c) => Math.abs(Math.hypot(q[0] - c.x, q[1] - c.y) - c.r) < 0.3);
+    // straight segments of long lines, on a coarse grid, to test 'this point lies on a wire'
+    const LG = 8, lgrid = new Map();
+    paths.forEach((p) => {
+      if (!p.stroke || size(p) < SMALL) return;
+      for (const pl of p.polys) for (let k = 0; k + 1 < pl.length; k++) {
+        const a = pl[k], b = pl[k + 1];
+        for (let gx = Math.floor(Math.min(a[0], b[0]) / LG); gx <= Math.floor(Math.max(a[0], b[0]) / LG); gx++)
+          for (let gy = Math.floor(Math.min(a[1], b[1]) / LG); gy <= Math.floor(Math.max(a[1], b[1]) / LG); gy++) {
+            const k2 = gx + ',' + gy; if (!lgrid.has(k2)) lgrid.set(k2, []); lgrid.get(k2).push([a, b]);
+          }
+      }
+    });
+    const onLong = (q) => (lgrid.get(Math.floor(q[0] / LG) + ',' + Math.floor(q[1] / LG)) || []).some(([a, b]) => ptSeg(q, a, b) < 0.06);
     const wirePiece = (p) => {
       if (p.polys.length !== 1 || p.polys[0].length !== 2 || size(p) < 1.5) return false;
-      if (Math.abs(p.bbox[2] - p.bbox[0]) > 0.05 && Math.abs(p.bbox[3] - p.bbox[1]) > 0.05) return false;
       const [a, b] = p.polys[0];
+      // a jog or stub joining two wires: both ends on long lines (characters never touch wires at both ends)
+      if (onLong(a) && onLong(b)) return true;
+      if (Math.abs(p.bbox[2] - p.bbox[0]) > 0.05 && Math.abs(p.bbox[3] - p.bbox[1]) > 0.05) return false;
       return (longEnds.has(ek(a)) && onCircle(b)) || (longEnds.has(ek(b)) && onCircle(a));
     };
     // dashed lines (a cable drawn dashed into a terminal): 5+ collinear dashes of one length at one spacing
