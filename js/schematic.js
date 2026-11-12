@@ -135,6 +135,12 @@
     paths.forEach((p, i) => {
       if (!p.stroke || textPath.has(i) || p.polys.length !== 1) return;
       const pl = p.polys[0];
+      // round symbols bigger than a terminal (motor, lamp, meter): their outline joins nothing, leads end on it
+      if (pl.length >= 12 && Math.hypot(pl[0][0] - pl[pl.length - 1][0], pl[0][1] - pl[pl.length - 1][1]) < 0.05) {
+        const w = p.bbox[2] - p.bbox[0], h = p.bbox[3] - p.bbox[1];
+        if (w > 6.5 && w < 45 && Math.abs(w - h) < 0.1 * w) { bodies.push(p.bbox); textPath.add(i); }
+        return;
+      }
       if (pl.length !== 5 || Math.hypot(pl[0][0] - pl[4][0], pl[0][1] - pl[4][1]) > 0.05) return;
       for (let k = 0; k < 4; k++) if (Math.abs(pl[k][0] - pl[k + 1][0]) > 0.05 && Math.abs(pl[k][1] - pl[k + 1][1]) > 0.05) return;
       const w = p.bbox[2] - p.bbox[0], h = p.bbox[3] - p.bbox[1];
@@ -242,9 +248,16 @@
     };
 
     // ---- words by role
-    const W = ocr.words.map((w) => Object.assign({}, w, { c: center(w.bbox) }));
+    // IEC device codes never start with O and ANSI numbers never with 0: -OM1 / -0L1 / -0DL are a misread Q
+    const W = ocr.words.map((w) => Object.assign({}, w, { c: center(w.bbox), text: /^-[O0][A-Z]/.test(w.text) && !/^-[O0](FF|N)$/.test(w.text) ? '-Q' + w.text.slice(2) : w.text }));
     // selector positions (-OFF, -ON, -AUTO ...) are drawn with a dash but are not devices
-    const devLabels = W.filter((w) => RX.device.test(w.text) && !/^-([O0]FF|[O0]N|AUT[O0]|MAN(UAL)?|NC|N[O0]|REM(OTE)?|L[O0]C(AL)?)$/.test(w.text));
+    // nothing in the title block (bottom of the sheet: job number -PP0817B ...) is a device
+    const inTitle = (w) => vec.height && w.c[1] > 0.875 * vec.height;
+    const devLabels0 = W.filter((w) => !inTitle(w) && RX.device.test(w.text) && !/^-([O0]FF|[O0]N|AUT[O0]|MAN(UAL)?|NC|N[O0]|REM(OTE)?|L[O0]C(AL)?)$/.test(w.text) &&
+      !/^-\d+\.\d+[A-Z]{1,3}$/.test(w.text));                     // ratings such as -1.5A are not devices
+    // a value written just under a device label (its rating: 6A, 16A) is not a device either
+    const devLabels = devLabels0.filter((d) => !(/^-\d+[A-Z]{1,2}$/.test(d.text) && devLabels0.some((u) => u !== d && !/^-\d+[A-Z]{1,2}$/.test(u.text) &&
+      d.bbox[1] - u.bbox[3] > -0.5 && d.bbox[1] - u.bbox[3] < 0.9 * (u.H || 2) && d.bbox[0] < u.bbox[2] && d.bbox[2] > u.bbox[0])));
     const xrefs = W.filter((w) => RX.xref.test(w.text));
 
     const links0 = dashLinks.filter((l) => l.horiz && l.e - l.s < 260).map((l) => ({ y: l.k, x0: l.s, x1: l.e })).sort((a, b) => (a.y - b.y) || (a.x0 - b.x0));
@@ -301,11 +314,19 @@
       const cand = W.filter((w) => !RX.device.test(w.text) && !RX.xref.test(w.text) && w.text.length <= 6 && boxDist(w.bbox, tc.bbox) < 3.5)
         // a single letter beside a terminal is usually the pin of the device next to it (lamp L / N): prefer longer names
         .sort((a, b) => (boxDist(a.bbox, tc.bbox) + (a.text.length === 1 ? 2 : 0)) - (boxDist(b.bbox, tc.bbox) + (b.text.length === 1 ? 2 : 0)));
-      const blk = tc.block;
-      if (cand[0]) termWords.add(cand[0]);
-      const pin = cand[0] ? cand[0].text : '?';
+      let blk = tc.block;
+      let pin = cand[0] ? cand[0].text : '?';
+      // strip and number written together beside the circle (-X6.M11 = strip X6, terminal M11)
+      const both = W.filter((w) => /^-X\d+[A-Z]?\.[A-Z0-9][A-Z0-9.+\-]*$/.test(w.text) && boxDist(w.bbox, tc.bbox) < 4)
+        .sort((a, b) => boxDist(a.bbox, tc.bbox) - boxDist(b.bbox, tc.bbox))[0];
+      if (both && (!cand[0] || boxDist(both.bbox, tc.bbox) <= boxDist(cand[0].bbox, tc.bbox) + 1)) {
+        const m = both.text.match(/^(-X\d+[A-Z]?)\.(.+)$/);
+        blk = { text: m[1] }; pin = m[2]; termWords.add(both);
+      } else if (cand[0]) termWords.add(cand[0]);
       // no block label near the row: when the sheet uses a single block name, that is it
-      const blkName = blk ? blk.text : (soleBlock || '-TB?');
+      let blkName = blk ? blk.text : (soleBlock || '-TB?');
+      const comb = blkName.match(/^(-X\d+[A-Z]?)\.(.+)$/);       // carried a combined label along the row
+      if (comb) blkName = comb[1];
       touching.forEach((k) => nets[k].terms.push({ dev: blkName, pin: pin, x: tc.x, y: tc.y, sure: !!(blk && cand[0]) }));
     }
     // device pins: pin text beside a symbol lead; device = label left of the symbol, or the label at the
@@ -477,6 +498,18 @@
       const best = g.filter((pc) => pc.dev).sort((a, b) => a.dev[1] - b.dev[1])[0];
       if (best) g.forEach((pc) => { if (!pc.dev || pc.dev[1] > best.dev[1] + 6) pc.dev = best.dev; });
     }
+    // contact pairs 1-2, 3-4, 13-14, 95-96, A1-A2 in one column: a pin far from the label takes its partner's device
+    const partner = (t) => {
+      const m = t.match(/^([A-Z]?)(\d{1,2})$/); if (!m) return null;
+      const n = +m[2]; return m[1] + (n % 2 ? n + 1 : n - 1);
+    };
+    for (const pc of pinCands) {
+      if (pc.dev) continue;
+      const want = partner(pc.w.text); if (!want) continue;
+      const mate = pinCands.filter((q) => q.dev && q.w.text === want && Math.abs(q.w.c[0] - pc.w.c[0]) < 1.5 && Math.abs(q.w.c[1] - pc.w.c[1]) < 60)
+        .sort((a, b) => Math.abs(a.w.c[1] - pc.w.c[1]) - Math.abs(b.w.c[1] - pc.w.c[1]))[0];
+      if (mate) pc.dev = [mate.dev[0], mate.dev[1] + 4];
+    }
     for (const r of rowsP) {
       for (const pc of r) {
         if (!pc.dev || (pc.weak && !pc.boxed)) { used.delete(pc.w); continue; }
@@ -499,7 +532,27 @@
     const longL = dashLinks.filter((l) => l.e - l.s > 25).concat(boundLines);
     const longH = longL.filter((l) => l.horiz), longV = longL.filter((l) => !l.horiz);
     const boxes = [];
-    for (const w of W.filter((x) => RX.loc.test(x.text))) {
+    // location captions in words (PP0817B: 'TRANSFORMER TANK SIDE.' marks the transformer part of the sheet):
+    // words on one line form a phrase; a transformer-side phrase is a +TR label at the phrase's first word
+    const phraseLabels = [];
+    {
+      const ws = W.filter((w) => w.rot === 0 && /^[A-Z]{3,}\.?$/.test(w.text)).sort((a, b) => (a.bbox[3] - b.bbox[3]) || (a.bbox[0] - b.bbox[0]));
+      const used2 = new Set();
+      for (const a of ws) {
+        if (used2.has(a)) continue;
+        const line = [a];
+        for (const b of ws) {
+          const last = line[line.length - 1];
+          if (b === last || used2.has(b) || Math.abs(b.bbox[3] - last.bbox[3]) > 0.3 * last.H) continue;
+          const gap = b.bbox[0] - last.bbox[2];
+          if (gap > 0 && gap < 2 * last.H) line.push(b);
+        }
+        line.forEach((x) => used2.add(x));
+        const txt = line.map((x) => x.text.replace(/\.$/, '')).join(' ');
+        if (/\b(TRANSFORMER (TANK )?SIDE|TANK SIDE|ON TRANSFORMER|TRANSFORMER MOUNTED)\b/.test(txt)) phraseLabels.push(Object.assign({}, line[0], { text: '+TR', c: line[0].c }));
+      }
+    }
+    for (const w of W.filter((x) => RX.loc.test(x.text)).concat(phraseLabels)) {
       const [x, y] = w.c;
       const top = longH.filter((l) => l.k < y && l.s - 3 < x && l.e + 3 > x).sort((a, b) => b.k - a.k)[0];
       const bot = longH.filter((l) => l.k > y && l.s - 3 < x && l.e + 3 > x).sort((a, b) => a.k - b.k)[0];
