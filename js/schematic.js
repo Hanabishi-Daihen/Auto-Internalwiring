@@ -243,7 +243,13 @@
     const devLabels = W.filter((w) => RX.device.test(w.text) && !/^-([O0]FF|[O0]N|AUT[O0]|MAN(UAL)?|NC|N[O0]|REM(OTE)?|L[O0]C(AL)?)$/.test(w.text));
     const xrefs = W.filter((w) => RX.xref.test(w.text));
 
-    const links = dashLinks.filter((l) => l.horiz && l.e - l.s < 260).map((l) => ({ y: l.k, x0: l.s, x1: l.e }));
+    const links0 = dashLinks.filter((l) => l.horiz && l.e - l.s < 260).map((l) => ({ y: l.k, x0: l.s, x1: l.e })).sort((a, b) => (a.y - b.y) || (a.x0 - b.x0));
+    // a contact drawn across the link interrupts it: pieces on one line with a short gap are one link
+    const links = [];
+    for (const l of links0) {
+      const last = links[links.length - 1];
+      if (last && Math.abs(last.y - l.y) < 0.3 && l.x0 - last.x1 < 10) last.x1 = Math.max(last.x1, l.x1); else links.push(Object.assign({}, l));
+    }
     // terminal block labels (-TB01) name terminal circles, not the pins of the symbols beside them
     const pinLabels = devLabels.filter((d) => !/^-TB/.test(d.text));
     const labelLeftOf = (x, y, maxDx, maxDy) => pinLabels.map((d) => {
@@ -323,10 +329,37 @@
       const nn = nearestNet(w.c[0], w.c[1], 3.0, w.bbox);
       if (!nn) continue;
       let dev = labelLeftOf(w.c[0], w.c[1], 44, 24);
-      const lk = links.filter((l) => Math.abs(l.y - w.c[1]) < 11 && w.c[0] > l.x0 - 4 && w.c[0] < l.x1 + 8);
+      // contacts drawn sideways (49F 98-97): the label sits above the contact, over or just left of its pins
+      if (!dev) {
+        const up = pinLabels.map((d) => {
+          const dy = w.bbox[1] - d.bbox[3], dx = w.c[0] - d.bbox[0];
+          if (dy < 0 || dy > 22 || dx < -2 || dx > (d.bbox[2] - d.bbox[0]) + 30) return null;
+          return [d, 10 + dy + 0.3 * Math.max(0, w.c[0] - d.bbox[2])];
+        }).filter(Boolean).sort((a, b) => a[1] - b[1])[0];
+        if (up) dev = up;
+      } else {
+        const up = pinLabels.map((d) => {
+          const dy = w.bbox[1] - d.bbox[3], dx = w.c[0] - d.bbox[0];
+          if (dy < 0 || dy > 14 || dx < -2 || dx > (d.bbox[2] - d.bbox[0]) + 6) return null;
+          return [d, 10 + dy];
+        }).filter(Boolean).sort((a, b) => a[1] - b[1])[0];
+        if (up && up[1] < dev[1] - 8) dev = up;
+      }
+      const lk = links.filter((l) => Math.abs(l.y - w.c[1]) < 16 && w.c[0] > l.x0 - 6 && w.c[0] < l.x1 + 8);
       for (const l of lk) {
-        const ld = labelLeftOf(l.x0, l.y, 34, 15);
-        if (ld && (!dev || dev[1] > 18)) dev = [ld[0], 18];
+        let ld = labelLeftOf(l.x0, l.y, 34, 15);
+        // selector switches: the label sits under (or over) the start of the link, not left of it
+        if (!ld) {
+          const bd = (b) => Math.hypot(Math.max(b[0] - l.x0, 0, l.x0 - b[2]), Math.max(b[1] - l.y, 0, l.y - b[3]));
+          const near = pinLabels.filter((d) => bd(d.bbox) < 26 && d.c[0] < l.x0 + 0.5 * (l.x1 - l.x0)).sort((a, b) => bd(a.bbox) - bd(b.bbox))[0];
+          if (near) ld = [near, 18];
+          else {
+            // a device code written without its dash right at the start of the link (83C)
+            const bare = W.filter((d) => /^\d{1,3}[A-Z]{1,4}\d?$/.test(d.text) && bd(d.bbox) < 26 && d.c[0] < l.x0).sort((a, b) => bd(a.bbox) - bd(b.bbox))[0];
+            if (bare) ld = [Object.assign({}, bare, { text: '-' + bare.text }), 18];
+          }
+        }
+        if (ld && (!dev || dev[1] > 18) && (Math.abs(l.y - w.c[1]) < 11 || !dev)) dev = [ld[0], 18];
       }
       pinCands.push({ w: w, nn: nn, dev: weak ? null : dev, linked: lk.length > 0, weak: weak });
       used.add(w);
@@ -387,6 +420,33 @@
       }
       const r = [x0, b[1], x1, b[3]]; r.n = n; return r;
     };
+    // rows of 3+ cells are units (annunciator): extended left/right along their top and bottom lines, named by a
+    // label inside the band or by the cells' captions (AN19 -> -AN)
+    const units = [];
+    {
+      const seen = new Set();
+      for (const b of devBoxes) {
+        const ch = chainOf(b), key = ch.map((v) => v.toFixed(1)).join(',');
+        if (ch.n < 3 || seen.has(key)) continue;
+        seen.add(key);
+        const along = (yy, x) => segs.filter((sg) => Math.abs(sg[1] - yy) < 0.3 && Math.abs(sg[3] - yy) < 0.3 && Math.min(sg[0], sg[2]) < x - 1 && Math.max(sg[0], sg[2]) > x - 1);
+        const ext = (x) => { const a = along(ch[1], x), c = along(ch[3], x); return a.length && c.length ? Math.max(Math.min(...a.map((sg) => Math.min(sg[0], sg[2]))), Math.min(...c.map((sg) => Math.min(sg[0], sg[2])))) : x; };
+        const r = [ext(ch[0]), ch[1], ch[2], ch[3]];
+        let lab = pinLabels.filter((d) => /[A-Z]/.test(d.text) && d.c[1] > r[1] && d.c[1] < r[3] && d.c[0] > r[0] - 2 && d.c[0] < r[2])[0];
+        if (!lab) {
+          const caps = (ocr.realText || []).concat(W).filter((w) => { const cx = (w.bbox[0] + w.bbox[2]) / 2, cy = (w.bbox[1] + w.bbox[3]) / 2; return cx > r[0] && cx < r[2] && cy > r[1] && cy < r[3]; })
+            .map((w) => (w.text.match(/^([A-Z]{1,3})\d{1,2}$/) || [])[1]).filter(Boolean);
+          const pre = caps.length >= 3 && caps.every((c) => c === caps[0]) ? caps[0] : null;
+          if (pre) lab = devLabels.find((d) => d.text === '-' + pre);
+        }
+        if (lab) units.push({ r: r, lab: lab });
+      }
+    }
+    for (const pc of pinCands) {
+      const w = pc.w;
+      const u = units.find((q) => w.c[0] >= q.r[0] - 1 && w.c[0] <= q.r[2] + 1 && Math.max(q.r[1] - w.bbox[3], w.bbox[1] - q.r[3]) < 8 && Math.max(q.r[1] - w.bbox[3], w.bbox[1] - q.r[3]) > -1);
+      if (u && (!pc.dev || pc.dev[1] > 6)) { pc.dev = [u.lab, 6]; pc.boxed = true; }
+    }
     // a device label written inside a box names the pins along that box
     for (const pc of pinCands) {
       const w = pc.w;
