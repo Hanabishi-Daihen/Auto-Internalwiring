@@ -1156,12 +1156,14 @@
   let autoResult = null;
   const KEY_STORE = 'iwp.anthropic.key';
   function autoCabRows() {
-    return $$('#aCabs tr[data-r]').map((tr) => ({ loc: tr.querySelector('[data-k=loc]').value.trim(), outline: tr.querySelector('[data-k=out]').value.trim() }))
+    return $$('#aCabs tr[data-r]').map((tr) => ({ loc: tr.querySelector('[data-k=loc]').value.trim(), outline: tr.querySelector('[data-k=out]').value.trim(), src: +(tr.querySelector('[data-k=src]') || { value: -1 }).value }))
       .filter((r) => r.loc);
   }
   function renderAutoCabs(rows) {
-    $('#aCabs').innerHTML = '<tr><th>ตู้ (LOC.)</th><th>หน้า Outline ของตู้นี้</th><th></th></tr>' + rows.map((r, i) =>
-      `<tr data-r="${i}"><td><input data-k="loc" value="${esc(r.loc)}" placeholder="เช่น LCC."></td><td><input data-k="out" value="${esc(r.outline)}" placeholder="เช่น 30 หรือ 3-4"></td><td><button class="iconbtn" data-delcab="${i}">✕</button></td></tr>`).join('');
+    const srcOpts = (sel) => `<option value="-1">ไฟล์ Schematic</option>` + instDocs.map((d, k) => `<option value="${k}" ${sel === k ? 'selected' : ''}>${esc(d.name)}</option>`).join('');
+    $('#aCabs').innerHTML = '<tr><th>ตู้ (LOC.)</th><th>Outline จากไฟล์</th><th>หน้า Outline</th><th></th></tr>' + rows.map((r, i) =>
+      `<tr data-r="${i}"><td><input data-k="loc" value="${esc(r.loc)}" placeholder="เช่น LCC."></td><td><select data-k="src">${srcOpts(r.src == null ? -1 : r.src)}</select></td>` +
+      `<td><input data-k="out" value="${esc(r.outline)}" placeholder="เช่น 30 หรือ 1-3"></td><td><button class="iconbtn" data-delcab="${i}">✕</button></td></tr>`).join('');
   }
   function autoLog(msg, frac) {
     const el = $('#aLog'); el.textContent += msg + '\n'; el.scrollTop = el.scrollHeight;
@@ -1185,7 +1187,7 @@
     }
   };
   let autoAbort = null;
-  let instDoc = null, instName = '';      // separate Installing / Outline PDF (optional)
+  const instDocs = [];      // separate Installing / Outline PDFs (optional): [{doc, name}]
   const pdfKey = () => (pdfDoc && pdfDoc.fingerprints && pdfDoc.fingerprints[0]) || (pdfName + ':' + (pdfDoc ? pdfDoc.numPages : 0));
   async function runAuto(preloaded) {
     if (!pdfDoc) { toast('เลือกไฟล์ Schematic PDF ก่อน'); return; }
@@ -1239,12 +1241,12 @@
       for (const c of cabs) {
         const L = c.loc.replace(/^\+/, '').replace(/\.$/, '').toUpperCase();
         const wanted = Array.from(merged.devices.entries()).filter(([, d]) => d.loc.replace(/\.$/, '') === L).map(([k]) => k);
-        const oDoc = instDoc || pdfDoc;
+        const inst = c.src >= 0 ? instDocs[c.src] : null, oDoc = inst ? inst.doc : pdfDoc;
         for (const pg of A.parsePages(c.outline, oDoc.numPages)) {
-          autoLog(`อ่าน Outline หน้า ${pg}${instDoc ? ' ของ ' + instName : ''} (${c.loc})…`, 0.88);
+          autoLog(`อ่าน Outline หน้า ${pg}${inst ? ' ของ ' + inst.name : ''} (${c.loc})…`, 0.88);
           const o = await A.readOutline(oDoc, pg, window.pdfjsLib.OPS, window.GLYPH_TEMPLATES, wanted);
           o.loc = multi ? L + '.' : c.loc;
-          o.inst = !!instDoc;
+          o.src = inst ? c.src : -1;
           outlines.push(o);
           autoLog(`  พบตำแหน่งอุปกรณ์ ${Object.keys(o.positions).length}/${wanted.length} · รางวายเวย์ ${o.wireways.length}`);
         }
@@ -1339,11 +1341,11 @@
     });
     project = P;
     for (const o of r.outlines) {
-      const doc = o.inst ? instDoc : pdfDoc;
+      const inst = o.src >= 0 ? instDocs[o.src] : null, doc = inst ? inst.doc : pdfDoc;
       if (!doc) { toast('ไม่พบไฟล์ Installing ที่ใช้อ่าน — เลือกไฟล์อีกครั้ง', 6000); continue; }
       const page = await doc.getPage(o.page);
-      const id = (o.inst ? 'bgI' : 'bg') + o.page;
-      await setBackgroundFromPdf(page, page.getViewport({ scale: 1 }), id, `${(o.inst ? instName : pdfName).replace(/\.pdf$/i, '')} หน้า ${o.page}`, o.page, o.loc);
+      const id = (inst ? 'bgI' + o.src + '_' : 'bg') + o.page;
+      await setBackgroundFromPdf(page, page.getViewport({ scale: 1 }), id, `${(inst ? inst.name : pdfName).replace(/\.pdf$/i, '')} หน้า ${o.page}`, o.page, o.loc);
       o.bg = id;
     }
     const merged = Object.assign({}, r.merged, { nets: r.merged.nets.filter((_, i) => !r.exclude.has(i)) });
@@ -1364,15 +1366,28 @@
       try { await openPdf(f); $('#aPdfName').textContent = `${f.name} · ${pdfDoc.numPages} หน้า`; updateCost(); } catch (err) { toast('เปิด PDF ไม่ได้: ' + err.message); }
       e.target.value = '';
     });
+    const showInst = () => {
+      $('#aInstName').textContent = instDocs.length ? instDocs.map((d) => `${d.name} (${d.doc.numPages} หน้า)`).join(' · ') : 'ไม่ใช้ — หน้า Outline อยู่ในไฟล์ Schematic';
+      $('#aInstClear').hidden = !instDocs.length;
+    };
     $('#aInstFile').addEventListener('change', async (e) => {
-      const f = e.target.files[0]; e.target.value = ''; if (!f) return;
-      try {
-        await ensurePdfWorker();
-        instDoc = await window.pdfjsLib.getDocument({ data: await f.arrayBuffer() }).promise; instName = f.name;
-        $('#aInstName').textContent = `${f.name} · ${instDoc.numPages} หน้า (เลขหน้า Outline ด้านล่างอ้างอิงไฟล์นี้)`; $('#aInstClear').hidden = false;
-      } catch (err) { toast('เปิด PDF ไม่ได้: ' + err.message); }
+      const files = Array.from(e.target.files); e.target.value = ''; if (!files.length) return;
+      await ensurePdfWorker();
+      for (const f of files) {
+        try { instDocs.push({ doc: await window.pdfjsLib.getDocument({ data: await f.arrayBuffer() }).promise, name: f.name }); } catch (err) { toast('เปิด PDF ไม่ได้: ' + f.name + ' — ' + err.message); }
+      }
+      // each cabinet takes the installing file whose name carries its LOC (Installing_LCC_... -> LCC.), or the only one
+      const rows = autoCabRows();
+      rows.forEach((r) => {
+        const L = r.loc.replace(/^\+/, '').replace(/\.$/, '').toUpperCase();
+        const k = instDocs.findIndex((d) => new RegExp('(^|[^A-Z])' + L + '([^A-Z]|$)', 'i').test(d.name));
+        if (k >= 0) r.src = k; else if (instDocs.length === 1) r.src = 0;
+        if (r.src >= 0 && !r.outline) r.outline = instDocs[r.src].doc.numPages > 1 ? '1-' + instDocs[r.src].doc.numPages : '1';
+      });
+      renderAutoCabs(rows.length ? rows : [{ loc: '', outline: '' }]);
+      showInst();
     });
-    $('#aInstClear').addEventListener('click', (e) => { e.preventDefault(); instDoc = null; instName = ''; $('#aInstName').textContent = 'ไม่ใช้ — หน้า Outline อยู่ในไฟล์ Schematic'; $('#aInstClear').hidden = true; });
+    $('#aInstClear').addEventListener('click', (e) => { e.preventDefault(); instDocs.length = 0; renderAutoCabs(autoCabRows().map((r) => Object.assign(r, { src: -1 }))); showInst(); });
     $('#aAddCab').addEventListener('click', () => { const rows = autoCabRows(); rows.push({ loc: '', outline: '' }); renderAutoCabs(rows); });
     $('#aCabs').addEventListener('click', (e) => {
       const i = e.target.dataset && e.target.dataset.delcab; if (i === undefined) return;

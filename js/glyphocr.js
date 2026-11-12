@@ -254,6 +254,37 @@
       if (ctx === w.rot || !c.best[ctx]) continue;
       if (c.best[ctx][1] >= c.best[w.rot][1] - 0.08 && c.best[ctx][1] >= 0.8) { w.rot = ctx; w.text = c.best[ctx][0]; w.H = H(c, ctx); }
     }
+    // the letter I is a bare stroke and is not taken as a character (WIRE read as WRE): a stroke of letter height
+    // on the baseline, inside or right beside a word of letters, is an I
+    for (const it of items) {
+      if (it.kind !== 'vline' && it.kind !== 'hline') continue;
+      const [X0, Y0, X1, Y1] = it.bbox;
+      for (const w of words) {
+        if (!w.members || (w.text.match(/[A-Z]/g) || []).length < 2) continue;
+        const r = w.rot, b = w.bbox, Hm = w.H;
+        if (r === 0 ? it.kind !== 'vline' : it.kind !== 'hline') continue;
+        const len = r === 0 ? it.h : it.w;
+        if (len < 0.85 * Hm || len > 1.12 * Hm) continue;
+        // along = reading direction, across = baseline direction
+        const al = r === 0 ? (X0 + X1) / 2 : r === 1 ? -(Y0 + Y1) / 2 : (Y0 + Y1) / 2;
+        const lo = r === 0 ? b[0] : r === 1 ? -b[3] : b[1], hi = r === 0 ? b[2] : r === 1 ? -b[1] : b[3];
+        const aligned = r === 0 ? Math.abs(Y1 - b[3]) < 0.15 * Hm && Math.abs(Y0 - b[1]) < 0.2 * Hm
+          : r === 1 ? Math.abs(X1 - b[2]) < 0.15 * Hm && Math.abs(X0 - b[0]) < 0.2 * Hm
+            : Math.abs(X0 - b[0]) < 0.15 * Hm && Math.abs(X1 - b[2]) < 0.2 * Hm;
+        if (!aligned || al < lo - 0.45 * Hm || al > hi + 0.45 * Hm) continue;
+        const pos = (i) => { const bb = chars[i].bbox; return r === 0 ? (bb[0] + bb[2]) / 2 : r === 1 ? -(bb[1] + bb[3]) / 2 : (bb[1] + bb[3]) / 2; };
+        // not on top of an existing letter
+        if (w.members.some((i) => Math.abs(pos(i) - al) < 0.3 * Hm)) continue;
+        const ci = chars.length;
+        chars.push({ c: it.c, bbox: it.bbox, w: it.w, h: it.h, best: { 0: ['I', 0.9], 1: ['I', 0.9], 2: ['I', 0.9] }, kind: 'char' });
+        w.members.push(ci);
+        w.members.sort((a, b2) => pos(a) - pos(b2));
+        w.text = w.members.map((i) => (chars[i].best[r] || ['?'])[0]).join('');
+        w.bbox = [Math.min(b[0], X0), Math.min(b[1], Y0), Math.max(b[2], X1), Math.max(b[3], Y1)];
+        it.used = true;
+        break;
+      }
+    }
     // '-' prefixes and '.' separators
     for (const it of items) {
       if (it.kind !== 'hline' && it.kind !== 'vline' && it.kind !== 'dot') continue;

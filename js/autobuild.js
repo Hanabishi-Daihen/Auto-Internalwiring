@@ -20,6 +20,15 @@
   const normLoc = (s) => String(s || '').replace(/^\+/, '').replace(/\.$/, '').toUpperCase();
 
   // ---------------------------------------------------------------- method A (offline)
+  /** geometry of a text item in viewport space: origin, reading direction (dx,dy), up vector (ux,uy), rot 0 / 1 (up) / 2 (down) */
+  function textGeom(tx, width) {
+    const fh = Math.hypot(tx[2], tx[3]) || 1, L = Math.hypot(tx[0], tx[1]) || 1;
+    const dx = tx[0] / L, dy = tx[1] / L;
+    // pdf.js item.width is in text space units scaled like the font: convert with the horizontal scale
+    const w = (width || 0) * (L / fh > 0 ? L / fh : 1);
+    return { x: tx[4], y: tx[5], dx: dx, dy: dy, ux: tx[2], uy: tx[3], width: w, rot: Math.abs(dx) >= Math.abs(dy) ? 0 : dy < 0 ? 1 : 2 };
+  }
+
   /** whitespace-separated tokens of the page's real text, with approximate boxes in viewport points */
   async function textTokens(page) {
     const vp = page.getViewport({ scale: 1 });
@@ -28,13 +37,13 @@
     for (const it of tc.items) {
       const s = it.str || ''; if (!s.trim()) continue;
       const tx = root.pdfjsLib.Util.transform(vp.transform, it.transform);
-      const fh = Math.hypot(tx[2], tx[3]) || 1, rot = Math.abs(it.transform[1]) > Math.abs(it.transform[0]);
-      const per = (it.width || fh * 0.6 * s.length) / s.length;
+      const g = textGeom(tx, it.width || Math.hypot(tx[2], tx[3]) * 0.6 * s.length);
+      const per = g.width / s.length;
       const re = /\S+/g; let m;
       while ((m = re.exec(s))) {
         const a = m.index * per, b = (m.index + m[0].length) * per;
-        const bbox = rot ? [tx[4] - fh, tx[5] - b, tx[4], tx[5] - a] : [tx[4] + a, tx[5] - fh, tx[4] + b, tx[5]];
-        out.push({ text: m[0], rot: rot ? 1 : 0, bbox: bbox });
+        const p0 = [g.x + g.dx * a, g.y + g.dy * a], p1 = [g.x + g.dx * b + g.ux, g.y + g.dy * b + g.uy];
+        out.push({ text: m[0], rot: g.rot, bbox: [Math.min(p0[0], p1[0]), Math.min(p0[1], p1[1]), Math.max(p0[0], p1[0]), Math.max(p0[1], p1[1])] });
       }
     }
     return out;
@@ -321,8 +330,8 @@
     for (const it of tc.items) {
       const s = (it.str || '').trim(); if (!s) continue;
       const tx = root.pdfjsLib.Util.transform(vp.transform, it.transform);
-      const fh = Math.hypot(tx[2], tx[3]), rot = Math.abs(it.transform[1]) > Math.abs(it.transform[0]);
-      const cx = rot ? tx[4] - fh / 2 : tx[4] + it.width / 2, cy = rot ? tx[5] - it.width / 2 : tx[5] - fh / 2;
+      const g = textGeom(tx, it.width), rot = g.rot !== 0;
+      const cx = g.x + g.dx * g.width / 2 + g.ux / 2, cy = g.y + g.dy * g.width / 2 + g.uy / 2;
       s.split(/\s+/).forEach((t) => words.push({ text: t, x: cx, y: cy, rot: rot ? 1 : 0, src: 'text' }));
     }
     // 2) vector text
@@ -362,12 +371,30 @@
       pos[key] = { x: w.x, y: w.y, src: w.src + '~' };
       if (w.src === 'text' && canon(w.text) !== canon(key)) renames[key] = ((key.match(/^(\+[A-Z0-9]+)-/) || [])[1] || '') + '-' + canon(w.text);
     }
-    // wireways: 'WIRE WAY' text sits in the middle of the duct
+    // terminals written -X3.102 are single terminals of strip X3: the outline only names the strip,
+    // so they go along the strip label (marked assumed - the user drags the strip into place if needed)
+    const strips = {};
+    for (const w of words) { const m = canon(w.text).match(/^(X\d{1,2}[A-Z]?)$/); if (m && !strips[m[1]]) strips[m[1]] = w; }
+    const byStrip = {};
+    for (const k of wanted || []) {
+      if (pos[k]) continue;
+      const m = k.match(/^(?:\+[A-Z0-9]+)?-(X\d{1,2}[A-Z]?)\.(.+)$/);
+      if (m && strips[m[1]]) (byStrip[m[1]] = byStrip[m[1]] || []).push([k, m[2]]);
+    }
+    for (const [st, list] of Object.entries(byStrip)) {
+      const w = strips[st];
+      list.sort((a, b) => a[1].localeCompare(b[1], undefined, { numeric: true }));
+      const vertical = w.rot !== 0 ? false : true;           // strips under a horizontal label run downwards
+      list.forEach(([k], i) => { const d = 3 + Math.min(i, 80) * 0.7; pos[k] = { x: vertical ? w.x : w.x + d, y: vertical ? w.y + d : w.y, src: 'strip', assumed: true }; });
+    }
+    // wireways: 'WIRE WAY' / 'W/W' text sits in the middle of the duct
     const wireways = [];
-    const ww = ocr.words.filter((w) => /^WIRE$/.test(w.text));
+    const ww = ocr.words.filter((w) => /^(WIRE|W\/W|WIREWAY)$/.test(w.text))
+      .concat(words.filter((w) => w.src === 'text' && /^(WIRE|W\/W|WIREWAY)$/i.test(w.text)).map((w) => ({ text: w.text, rot: w.rot, bbox: [w.x - 3, w.y - 1.5, w.x + 3, w.y + 1.5] })));
     for (const w of ww) {
       const horiz = w.rot === 0;
       const cx = (w.bbox[0] + w.bbox[2]) / 2, cy = (w.bbox[1] + w.bbox[3]) / 2;
+      const reach = Math.max(9, 4 * (w.H || 0));      // wider ducts on large-scale installing drawings
       // duct walls: long lines parallel to the text, a few points either side
       let best = null;
       for (const p of vec.paths) {
@@ -376,10 +403,10 @@
           const a = pl[k], b = pl[k + 1];
           const L = Math.hypot(b[0] - a[0], b[1] - a[1]);
           if (L < 25) continue;
-          if (horiz && Math.abs(a[1] - b[1]) < 0.1 && Math.abs(a[1] - cy) < 9 && Math.min(a[0], b[0]) < cx && Math.max(a[0], b[0]) > cx) {
+          if (horiz && Math.abs(a[1] - b[1]) < 0.1 && Math.abs(a[1] - cy) < reach && Math.min(a[0], b[0]) < cx && Math.max(a[0], b[0]) > cx) {
             if (!best || L > best.L) best = { L: L, s: Math.min(a[0], b[0]), e: Math.max(a[0], b[0]) };
           }
-          if (!horiz && Math.abs(a[0] - b[0]) < 0.1 && Math.abs(a[0] - cx) < 9 && Math.min(a[1], b[1]) < cy && Math.max(a[1], b[1]) > cy) {
+          if (!horiz && Math.abs(a[0] - b[0]) < 0.1 && Math.abs(a[0] - cx) < reach && Math.min(a[1], b[1]) < cy && Math.max(a[1], b[1]) > cy) {
             if (!best || L > best.L) best = { L: L, s: Math.min(a[1], b[1]), e: Math.max(a[1], b[1]) };
           }
         }
@@ -429,7 +456,7 @@
       o.wireways.forEach((w, i) => P.wireways.push(['WW' + o.page + '_' + (i + 1), +w[0].toFixed(2), +w[1].toFixed(2), +w[2].toFixed(2), +w[3].toFixed(2), vid]));
       pts.forEach(([k, p]) => {
         if (P.devices[k] && P.devices[k].view) return;
-        P.devices[k] = { view: vid, bg: o.bg, x: +p.x.toFixed(2), y: +p.y.toFixed(2), w: 5, h: 5, desc: '', assumed: false, loc: loc };
+        P.devices[k] = { view: vid, bg: o.bg, x: +p.x.toFixed(2), y: +p.y.toFixed(2), w: 5, h: 5, desc: p.assumed ? 'วางตามป้ายราง Terminal - ตรวจตำแหน่ง' : '', assumed: !!p.assumed, loc: loc };
         placed++;
       });
     }

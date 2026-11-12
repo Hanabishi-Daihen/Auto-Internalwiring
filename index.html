@@ -51,13 +51,13 @@
         </div>
         <h3 style="margin-top:14px">ตู้และหน้า Outline</h3>
         <div class="form">
-          <label>ไฟล์ PDF Installing / Outline แยก (ถ้ามี — ตัวอักษรใหญ่ชัดกว่า อ่านตำแหน่งอุปกรณ์ได้ดีกว่า)<span class="row"><span id="aInstName" class="hint">ไม่ใช้ — หน้า Outline อยู่ในไฟล์ Schematic</span>
-            <label class="btn small ghost"><input type="file" id="aInstFile" accept="application/pdf" hidden>📄 เลือกไฟล์</label>
+          <label>ไฟล์ PDF Installing / Outline แยก (ถ้ามี — เลือกได้หลายไฟล์ เช่น ตู้ละไฟล์; ตัวอักษรใหญ่ชัดกว่า อ่านตำแหน่งอุปกรณ์ได้ดีกว่า)<span class="row"><span id="aInstName" class="hint">ไม่ใช้ — หน้า Outline อยู่ในไฟล์ Schematic</span>
+            <label class="btn small ghost"><input type="file" id="aInstFile" accept="application/pdf" multiple hidden>📄 เลือกไฟล์</label>
             <button class="iconbtn" id="aInstClear" title="ไม่ใช้ไฟล์แยก" hidden>✕</button></span></label>
         </div>
         <table class="grid" id="aCabs"></table>
         <div class="rowbtn" style="margin-top:6px"><button class="btn small ghost" id="aAddCab">+ เพิ่มตู้</button></div>
-        <p class="note">หน้า Outline ใส่ได้หลายหน้า เช่น <code>3-4</code> (ถ้าเลือกไฟล์ Installing แยก ให้ใส่เลขหน้าของไฟล์นั้น) · ถ้าแบบมี LCC และ RCC ในหน้าวงจรเดียวกัน ให้ใส่ทั้งสองตู้ โปรแกรมแยกจากกรอบประ +LCC / +RCC</p>
+        <p class="note">หน้า Outline ใส่ได้หลายหน้า เช่น <code>3-4</code> (เลขหน้าของไฟล์ที่เลือกในคอลัมน์ “Outline จากไฟล์” — ไฟล์ที่ชื่อมีชื่อตู้ เช่น Installing_LCC_… ถูกจับคู่ให้อัตโนมัติ) · ถ้าแบบมี LCC และ RCC ในหน้าวงจรเดียวกัน ให้ใส่ทั้งสองตู้ โปรแกรมแยกจากกรอบประ +LCC / +RCC</p>
         <div class="form">
           <label>Process No.<input id="aProc" placeholder="เช่น PP1047A"></label>
           <label>Project<input id="aProj" placeholder="(ไม่บังคับ)"></label>
