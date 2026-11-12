@@ -130,14 +130,16 @@
     // ---- wire segments
     // component bodies: small closed rectangles (overload relay, MCB, coil boxes). Strokes inside a body
     // are the symbol's internals (e.g. the heater loop that runs straight from pin 1 to pin 2), not wiring.
-    const bodies = [];
+    const bodies = [], devBoxes = [];
     paths.forEach((p, i) => {
       if (!p.stroke || textPath.has(i) || p.polys.length !== 1) return;
       const pl = p.polys[0];
       if (pl.length !== 5 || Math.hypot(pl[0][0] - pl[4][0], pl[0][1] - pl[4][1]) > 0.05) return;
       for (let k = 0; k < 4; k++) if (Math.abs(pl[k][0] - pl[k + 1][0]) > 0.05 && Math.abs(pl[k][1] - pl[k + 1][1]) > 0.05) return;
       const w = p.bbox[2] - p.bbox[0], h = p.bbox[3] - p.bbox[1];
-      if (w < 3 || h < 3 || w > 40 || h > 40) return;
+      if (w < 3 || h < 3 || w > 90 || h > 90) return;
+      devBoxes.push(p.bbox);                                // larger boxes (relay units like -47L) only name their pins
+      if (w > 40 || h > 40) return;
       bodies.push(p.bbox); textPath.add(i);
     });
     const clipOut = (s) => {   // pieces of s outside every body
@@ -274,6 +276,8 @@
       let cur = null;
       for (const tc of r.items.sort((a, b) => a.x - b.x)) { if (tc.block) cur = tc.block; else if (cur) tc.block = cur; }
     }
+    const blockNames = Array.from(new Set(tbLabels.filter((w) => /^-TB/.test(w.text)).map((w) => w.text)));
+    const soleBlock = blockNames.length === 1 ? blockNames[0] : null;
     const termWords = new Set();
     for (const tc of termCircles) {
       const touching = new Set();
@@ -290,17 +294,28 @@
       const blk = tc.block;
       if (cand[0]) termWords.add(cand[0]);
       const pin = cand[0] ? cand[0].text : '?';
-      touching.forEach((k) => nets[k].terms.push({ dev: blk ? blk.text : '-TB?', pin: pin, x: tc.x, y: tc.y, sure: !!(blk && cand[0]) }));
+      // no block label near the row: when the sheet uses a single block name, that is it
+      const blkName = blk ? blk.text : (soleBlock || '-TB?');
+      touching.forEach((k) => nets[k].terms.push({ dev: blkName, pin: pin, x: tc.x, y: tc.y, sure: !!(blk && cand[0]) }));
     }
     // device pins: pin text beside a symbol lead; device = label left of the symbol, or the label at the
     // left end of a dashed mechanical link running through the symbol
+    const touchesWire = (w) => (w.chars || []).some((ch) => ch.c && ch.c.polys.some((pl) => [pl[0], pl[pl.length - 1]].some(([px, py]) => near(px, py).some((j) => dist2seg(px, py, segs[j]) < 0.12))));
+    // a wire ending inside the word (the open arrow at a sheet reference, read as V) marks a symbol
+    const wireEndInside = (w) => {
+      const b = w.bbox, cx = (b[0] + b[2]) / 2, cy = (b[1] + b[3]) / 2;
+      return near(cx, cy).concat(near(b[0], b[1]), near(b[2], b[3])).some((j) => {
+        const sg = segs[j];
+        return [[sg[0], sg[1]], [sg[2], sg[3]]].some(([px, py]) => px > b[0] + 0.1 && px < b[2] - 0.1 && py > b[1] + 0.1 && py < b[3] - 0.1);
+      });
+    };
     const used = new Set(termWords);
     const pinCands = [];
     for (const w of W) {
       if (used.has(w) || RX.device.test(w.text) || RX.xref.test(w.text) || RX.loc.test(w.text)) continue;
       if (!RX.pin.test(w.text) || w.text.length > 4) continue;
       // symbol parts (contact arcs read as C or 0, a coil stroke read as I) touch the wire they belong to; text never does
-      if ((w.chars || []).some((ch) => ch.c && ch.c.polys.some((pl) => [pl[0], pl[pl.length - 1]].some(([px, py]) => near(px, py).some((j) => dist2seg(px, py, segs[j]) < 0.12))))) continue;
+      if (touchesWire(w)) continue;
       // text just under a device label is its cross reference (/10.G3), not a pin
       if (devLabels.some((d) => w.bbox[1] - d.bbox[3] > -0.5 && w.bbox[1] - d.bbox[3] < 4 && w.c[0] > d.bbox[0] - 2 && w.c[0] < d.bbox[2] + 6)) continue;
       const nn = nearestNet(w.c[0], w.c[1], 3.0, w.bbox);
@@ -335,8 +350,36 @@
         if (lab) r.forEach((pc) => { pc.dev = lab; });
       }
     }
+    // a column of pins (a device drawn turned, e.g. -8AM 1/3/5/7): the label written upright above the column
+    const colsP = [];
+    pinCands.slice().sort((a, b) => (a.w.c[0] - b.w.c[0]) || (a.w.c[1] - b.w.c[1])).forEach((pc) => {
+      const c = colsP.find((q) => {
+        const last = q[q.length - 1];
+        if (Math.abs(last.w.c[0] - pc.w.c[0]) > 1.0) return false;
+        const dy = pc.w.c[1] - last.w.c[1];
+        if (dy <= 0 || dy > 16) return false;
+        return !devLabels.some((d) => d.bbox[1] > last.w.c[1] && d.bbox[3] < pc.w.c[1] + 1 && Math.abs(d.c[0] - pc.w.c[0]) < 14);
+      });
+      if (c) c.push(pc); else colsP.push([pc]);
+    });
+    for (const c of colsP) {
+      if (c.length < 3 || c.some((pc) => pc.linked)) continue;
+      const top = c[0].w;
+      const lab = pinLabels.filter((d) => d.rot !== 0 && d.bbox[3] < top.bbox[1] + 1 && top.bbox[1] - d.bbox[3] < 30 && Math.abs(d.c[0] - top.c[0]) < 40)
+        .sort((a, b) => (top.bbox[1] - a.bbox[3] + Math.abs(a.c[0] - top.c[0])) - (top.bbox[1] - b.bbox[3] + Math.abs(b.c[0] - top.c[0])))[0];
+      if (lab) c.forEach((pc) => { if (!pc.dev || pc.dev[1] > 20) pc.dev = [lab, 20]; });
+    }
     // pins written above and below the same component box (1 over 2, 3 over 4 ...) are one device:
     // the pin far from the label inherits the device found for its partner
+    // a device label written inside a box names the pins along that box
+    for (const pc of pinCands) {
+      const w = pc.w;
+      const bx = devBoxes.filter((b) => w.c[0] >= b[0] - 1 && w.c[0] <= b[2] + 1 && Math.max(b[1] - w.bbox[3], w.bbox[1] - b[3]) < 8 && Math.max(b[1] - w.bbox[3], w.bbox[1] - b[3]) > -1);
+      for (const b of bx) {
+        const lab = pinLabels.find((d) => /[A-Z]/.test(d.text) && d.c[0] > b[0] && d.c[0] < b[2] && d.c[1] > b[1] && d.c[1] < b[3]);
+        if (lab) { pc.dev = [lab, 4]; break; }
+      }
+    }
     const byBody = new Map();
     for (const pc of pinCands) {
       const w = pc.w;
@@ -358,6 +401,7 @@
     // wire labels: label-like words close to a wire that are not pins
     for (const w of W) {
       if (used.has(w) || !RX.wire.test(w.text) || RX.device.test(w.text)) continue;
+      if (touchesWire(w) || wireEndInside(w)) continue;      // arrow heads (V) and symbol parts; labels never touch a wire
       const nn = nearestNet(w.c[0], w.c[1], 4.5, w.bbox);
       if (nn) nets[nn.net].labels.push({ text: w.text, d: nn.d });
     }

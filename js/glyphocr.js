@@ -115,8 +115,35 @@
       const [a, b] = p.polys[0];
       return (longEnds.has(ek(a)) && onCircle(b)) || (longEnds.has(ek(b)) && onCircle(a));
     };
-    const isSmall = (p) => p.stroke && !p.fill && size(p) < SMALL && !wirePiece(p);
-    const small = paths.filter(isSmall);
+    // dashed lines (a cable drawn dashed into a terminal): 5+ collinear dashes of one length at one spacing
+    const dashed = new Set();
+    for (const horiz of [true, false]) {
+      const ds = [];
+      paths.forEach((p, i) => {
+        if (!p.stroke || p.polys.length !== 1 || p.polys[0].length !== 2) return;
+        const [a, b] = p.polys[0], L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+        if (L < 0.4 || L > 4.5) return;
+        if (horiz ? Math.abs(a[1] - b[1]) > 0.02 : Math.abs(a[0] - b[0]) > 0.02) return;
+        ds.push(horiz ? { i: i, k: a[1], s: Math.min(a[0], b[0]), e: Math.max(a[0], b[0]), L: L } : { i: i, k: a[0], s: Math.min(a[1], b[1]), e: Math.max(a[1], b[1]), L: L });
+      });
+      ds.sort((x, y) => (x.k - y.k) || (x.s - y.s));
+      let run = [];
+      const flush = () => {
+        if (run.length >= 5) {
+          const gaps = run.slice(1).map((d, k) => d.s - run[k].e), Ls = run.map((d) => d.L);
+          if (Math.max(...gaps) - Math.min(...gaps) < 0.25 && Math.max(...Ls.slice(1, -1)) - Math.min(...Ls.slice(1, -1)) < 0.25) run.forEach((d) => dashed.add(d.i));
+        }
+        run = [];
+      };
+      for (const d of ds) {
+        const last = run[run.length - 1];
+        if (last && Math.abs(d.k - last.k) < 0.02 && d.s - last.e > 0.4 && d.s - last.e < 3) run.push(d);
+        else { flush(); run = [d]; }
+      }
+      flush();
+    }
+    const isSmall = (p, i) => p.stroke && !p.fill && size(p) < SMALL && !wirePiece(p) && !dashed.has(i);
+    const small = paths.filter((p, i) => isSmall(p, i));
     const n = small.length, par = new Int32Array(n).map((_, i) => i);
     const f = (x) => { while (par[x] !== x) { par[x] = par[par[x]]; x = par[x]; } return x; };
     const ends = small.map((q) => q.polys.flatMap((pl) => [pl[0], pl[pl.length - 1]]));
@@ -144,7 +171,7 @@
     }
     const groups = new Map();
     for (let i = 0; i < n; i++) { const r = f(i); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(i); }
-    const idx = []; paths.forEach((p, i) => { if (isSmall(p)) idx.push(i); });
+    const idx = []; paths.forEach((p, i) => { if (isSmall(p, i)) idx.push(i); });
     return Array.from(groups.values()).map((g) => mk(g.map((i) => small[i].polys), g.map((i) => idx[i])));
   }
   function mk(pathPolys, src) {
@@ -190,7 +217,22 @@
       return best ? best[1] : null;
     };
     const res = [];
-    for (const c of clusters(paths, maxChar)) {
+    // junction dots drawn as two or more concentric circles (a 'filled' dot made of strokes)
+    let cl = clusters(paths, maxChar);
+    const isCircle = (c) => c.paths.length === 1 && c.polys.length === 1 && c.polys[0].length >= 8 &&
+      Math.hypot(c.polys[0][0][0] - c.polys[0][c.polys[0].length - 1][0], c.polys[0][0][1] - c.polys[0][c.polys[0].length - 1][1]) < 0.05 &&
+      Math.abs((c.bbox[2] - c.bbox[0]) - (c.bbox[3] - c.bbox[1])) < 0.15 * Math.max(c.bbox[2] - c.bbox[0], 0.1) && c.bbox[2] - c.bbox[0] < 6.2;
+    const byCenter = new Map();
+    cl.forEach((c, i) => { if (!isCircle(c)) return; const k = Math.round((c.bbox[0] + c.bbox[2]) * 2.5) + ',' + Math.round((c.bbox[1] + c.bbox[3]) * 2.5); if (!byCenter.has(k)) byCenter.set(k, []); byCenter.get(k).push(i); });
+    const merged = new Set();
+    for (const ids of byCenter.values()) {
+      if (ids.length < 2) continue;
+      const d = mk(ids.map((i) => cl[i].paths).flat(), ids.map((i) => cl[i].src).flat());
+      d.dot = true; ids.forEach((i) => merged.add(i)); cl.push(d);
+    }
+    if (merged.size) cl = cl.filter((_, i) => !merged.has(i));
+    for (const c of cl) {
+      if (c.dot) { res.push([c, {}]); continue; }
       if (terminalCircle(c)) { c.terminal = true; res.push([c, {}]); continue; }
       const b = reader.classify(c.polys);
       const w = c.bbox[2] - c.bbox[0], h = c.bbox[3] - c.bbox[1];
@@ -201,6 +243,7 @@
       const w = c.bbox[2] - c.bbox[0], h = c.bbox[3] - c.bbox[1];
       const it = { c: c, bbox: c.bbox, w: w, h: h, best: best, kind: 'other' };
       if (c.terminal) it.kind = 'terminal';
+      else if (c.dot) it.kind = 'junction';
       else if (Math.max(w, h) < 1.2 && Math.min(w, h) > 0.5) it.kind = 'junction';
       else if (Object.keys(best).length && top(best) >= 0.8 && Math.max(w, h) >= 1.2) it.kind = 'char';
       else if (Math.max(w, h) < 0.45) it.kind = 'dot';
@@ -322,8 +365,16 @@
     }
     // cross references are written '/08.B1': join '/08' and 'B1' split by the dot gap
     for (const a of words) {
-      if (a.rot !== 0 || !/^\/\d{1,2}$/.test(a.text)) continue;
-      const b = words.find((x) => x !== a && x.rot === 0 && /^[A-I]\d{1,2}$/.test(x.text) && Math.abs(x.bbox[3] - a.bbox[3]) < 0.3 * a.H && x.bbox[0] - a.bbox[2] > 0 && x.bbox[0] - a.bbox[2] < 1.6 * a.H);
+      if (!/^\/\d{1,2}$/.test(a.text)) continue;
+      // same reading direction, same baseline, the second part just after the first (any of the 3 rotations)
+      const r = a.rot, A = a.bbox;
+      const b = words.find((x) => {
+        if (x === a || x.rot !== r || !/^[A-I]\d{1,2}$/.test(x.text)) return false;
+        const B = x.bbox, H = a.H;
+        if (r === 0) return Math.abs(B[3] - A[3]) < 0.3 * H && B[0] - A[2] > 0 && B[0] - A[2] < 1.6 * H;
+        if (r === 1) return Math.abs(B[2] - A[2]) < 0.3 * H && A[1] - B[3] > 0 && A[1] - B[3] < 1.6 * H;
+        return Math.abs(B[0] - A[0]) < 0.3 * H && B[1] - A[3] > 0 && B[1] - A[3] < 1.6 * H;
+      });
       if (b) { a.text = a.text + '.' + b.text; a.bbox = [a.bbox[0], Math.min(a.bbox[1], b.bbox[1]), b.bbox[2], Math.max(a.bbox[3], b.bbox[3])]; a.members = a.members.concat(b.members); b.dead = true; a.joined = true; }
     }
     for (let k = words.length - 1; k >= 0; k--) if (words[k].dead) words.splice(k, 1);
