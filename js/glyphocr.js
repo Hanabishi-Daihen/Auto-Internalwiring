@@ -97,7 +97,26 @@
   // ---------------------------------------------------------------- 1) characters
   function clusters(paths, maxChar) {
     const SMALL = maxChar || DEF_SMALL;
-    const small = paths.filter((p) => p.stroke && !p.fill && Math.max(p.bbox[2] - p.bbox[0], p.bbox[3] - p.bbox[1]) < SMALL);
+    const size = (p) => Math.max(p.bbox[2] - p.bbox[0], p.bbox[3] - p.bbox[1]);
+    // a short straight stroke that continues a long line end to end is a piece of wire (e.g. the stub between a
+    // terminal circle and the lead), not part of a character: with the circle it would read as 9 or 6
+    const longEnds = new Set();
+    const ek = (q) => Math.round(q[0] * 10) + ',' + Math.round(q[1] * 10);
+    paths.forEach((p) => { if (p.stroke && size(p) >= SMALL) for (const pl of p.polys) { longEnds.add(ek(pl[0])); longEnds.add(ek(pl[pl.length - 1])); } });
+    // ... and only when its other end touches a small circle (terminal); inside symbols such strokes are part of the symbol
+    const circles = paths.filter((p) => p.stroke && p.polys.length === 1 && p.polys[0].length >= 8 && size(p) > 1 && size(p) < 6.2 &&
+      Math.hypot(p.polys[0][0][0] - p.polys[0][p.polys[0].length - 1][0], p.polys[0][0][1] - p.polys[0][p.polys[0].length - 1][1]) < 0.05 &&
+      Math.abs((p.bbox[2] - p.bbox[0]) - (p.bbox[3] - p.bbox[1])) < 0.2 * size(p))
+      .map((p) => ({ x: (p.bbox[0] + p.bbox[2]) / 2, y: (p.bbox[1] + p.bbox[3]) / 2, r: (p.bbox[2] - p.bbox[0] + p.bbox[3] - p.bbox[1]) / 4 }));
+    const onCircle = (q) => circles.some((c) => Math.abs(Math.hypot(q[0] - c.x, q[1] - c.y) - c.r) < 0.3);
+    const wirePiece = (p) => {
+      if (p.polys.length !== 1 || p.polys[0].length !== 2 || size(p) < 1.5) return false;
+      if (Math.abs(p.bbox[2] - p.bbox[0]) > 0.05 && Math.abs(p.bbox[3] - p.bbox[1]) > 0.05) return false;
+      const [a, b] = p.polys[0];
+      return (longEnds.has(ek(a)) && onCircle(b)) || (longEnds.has(ek(b)) && onCircle(a));
+    };
+    const isSmall = (p) => p.stroke && !p.fill && size(p) < SMALL && !wirePiece(p);
+    const small = paths.filter(isSmall);
     const n = small.length, par = new Int32Array(n).map((_, i) => i);
     const f = (x) => { while (par[x] !== x) { par[x] = par[par[x]]; x = par[x]; } return x; };
     const ends = small.map((q) => q.polys.flatMap((pl) => [pl[0], pl[pl.length - 1]]));
@@ -125,7 +144,7 @@
     }
     const groups = new Map();
     for (let i = 0; i < n; i++) { const r = f(i); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(i); }
-    const idx = []; paths.forEach((p, i) => { if (p.stroke && !p.fill && Math.max(p.bbox[2] - p.bbox[0], p.bbox[3] - p.bbox[1]) < SMALL) idx.push(i); });
+    const idx = []; paths.forEach((p, i) => { if (isSmall(p)) idx.push(i); });
     return Array.from(groups.values()).map((g) => mk(g.map((i) => small[i].polys), g.map((i) => idx[i])));
   }
   function mk(pathPolys, src) {
@@ -310,7 +329,7 @@
     for (let k = words.length - 1; k >= 0; k--) if (words[k].dead) words.splice(k, 1);
     for (const w of words) {
       if (w.joined) { w.text = w.prefix + w.text; w.chars = w.members.map((i) => chars[i]); delete w.members; continue; }
-      let t = fixO0(w.text);
+      let t = fixO0(w.text, w.prefix === '-');
       if (w.dots) {
         const pos = w.members.map((i) => { const bb = chars[i].bbox; return w.rot === 0 ? (bb[0] + bb[2]) / 2 : w.rot === 1 ? -(bb[1] + bb[3]) / 2 : (bb[1] + bb[3]) / 2; });
         let o = '';
@@ -323,7 +342,7 @@
     }
     return words;
   }
-  function fixO0(t) {
+  function fixO0(t, device) {
     const c = t.split('');
     for (let k = 0; k < c.length; k++) {
       if (c[k] !== 'O' && c[k] !== '0') continue;
@@ -331,6 +350,8 @@
       const dig = [L, R].filter((x) => /\d/.test(x)).length, let_ = [L, R].filter((x) => /[A-NP-Z]/.test(x)).length;
       if (dig >= 1 && let_ === 0) c[k] = '0';
       else if (let_ === 2) c[k] = 'O';
+      // device names end in a counter starting at 1: a final O/0 after two letters is the letter (-86ACO)
+      else if (device && !R && /[A-Z]/.test(L) && /[A-Z]/.test(c[k - 2] || '')) c[k] = 'O';
     }
     return c.join('');
   }

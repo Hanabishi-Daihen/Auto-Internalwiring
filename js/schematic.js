@@ -94,7 +94,7 @@
         for (let k = 0; k + 1 < pl.length; k++) {
           const a = pl[k], c = pl[k + 1], L = Math.hypot(c[0] - a[0], c[1] - a[1]);
           const h = Math.abs(c[1] - a[1]) < 0.05, v = Math.abs(c[0] - a[0]) < 0.05;
-          if (!(h || v) || L < 8 || L > 45) continue;
+          if (!(h || v) || L < 2 || L > 45) continue;
           edges.push(h ? { i: i, horiz: true, k: a[1], s: Math.min(a[0], c[0]), e: Math.max(a[0], c[0]), L: L }
             : { i: i, horiz: false, k: a[0], s: Math.min(a[1], c[1]), e: Math.max(a[1], c[1]), L: L });
         }
@@ -118,7 +118,10 @@
           const gaps = chain.slice(1).map((d, k) => d.s - chain[k].e);
           const inner = chain.slice(1, -1).map((d) => d.L);   // end pieces may be cut by a corner
           if (Math.max(...gaps) - Math.min(...gaps) > 1.5) continue;
-          if (inner.length && Math.max(...inner) - Math.min(...inner) > 2) continue;
+          // one dash length (dashed) or two (dash-dot, e.g. 23pt + 4.7pt): at most two length classes
+          const cls = []; inner.slice().sort((a, b) => a - b).forEach((L) => { if (!cls.length || L - cls[cls.length - 1] > 1.5) cls.push(L); });
+          if (cls.length > 2) continue;
+          if (chain.reduce((t, d) => t + d.L, 0) < 25) continue;
           chain.forEach((d) => { textPath.add(d.i); done.add(ds.indexOf(d)); });
           boundLines.push({ horiz: horiz, k: chain[0].k, s: chain[0].s, e: chain[chain.length - 1].e });
         }
@@ -234,11 +237,14 @@
 
     // ---- words by role
     const W = ocr.words.map((w) => Object.assign({}, w, { c: center(w.bbox) }));
-    const devLabels = W.filter((w) => RX.device.test(w.text));
+    // selector positions (-OFF, -ON, -AUTO ...) are drawn with a dash but are not devices
+    const devLabels = W.filter((w) => RX.device.test(w.text) && !/^-([O0]FF|[O0]N|AUT[O0]|MAN(UAL)?|NC|N[O0]|REM(OTE)?|L[O0]C(AL)?)$/.test(w.text));
     const xrefs = W.filter((w) => RX.xref.test(w.text));
 
     const links = dashLinks.filter((l) => l.horiz && l.e - l.s < 260).map((l) => ({ y: l.k, x0: l.s, x1: l.e }));
-    const labelLeftOf = (x, y, maxDx, maxDy) => devLabels.map((d) => {
+    // terminal block labels (-TB01) name terminal circles, not the pins of the symbols beside them
+    const pinLabels = devLabels.filter((d) => !/^-TB/.test(d.text));
+    const labelLeftOf = (x, y, maxDx, maxDy) => pinLabels.map((d) => {
       const dx = x - d.bbox[2], dy = Math.abs(y - d.c[1]);
       if (dx < -2 || dx > maxDx || dy > maxDy) return null;
       return [d, dx + 1.6 * dy];
@@ -279,7 +285,8 @@
         }
       }
       const cand = W.filter((w) => !RX.device.test(w.text) && !RX.xref.test(w.text) && w.text.length <= 6 && boxDist(w.bbox, tc.bbox) < 3.5)
-        .sort((a, b) => boxDist(a.bbox, tc.bbox) - boxDist(b.bbox, tc.bbox));
+        // a single letter beside a terminal is usually the pin of the device next to it (lamp L / N): prefer longer names
+        .sort((a, b) => (boxDist(a.bbox, tc.bbox) + (a.text.length === 1 ? 2 : 0)) - (boxDist(b.bbox, tc.bbox) + (b.text.length === 1 ? 2 : 0)));
       const blk = tc.block;
       if (cand[0]) termWords.add(cand[0]);
       const pin = cand[0] ? cand[0].text : '?';
@@ -292,6 +299,8 @@
     for (const w of W) {
       if (used.has(w) || RX.device.test(w.text) || RX.xref.test(w.text) || RX.loc.test(w.text)) continue;
       if (!RX.pin.test(w.text) || w.text.length > 4) continue;
+      // symbol parts (contact arcs read as C or 0, a coil stroke read as I) touch the wire they belong to; text never does
+      if ((w.chars || []).some((ch) => ch.c && ch.c.polys.some((pl) => [pl[0], pl[pl.length - 1]].some(([px, py]) => near(px, py).some((j) => dist2seg(px, py, segs[j]) < 0.12))))) continue;
       // text just under a device label is its cross reference (/10.G3), not a pin
       if (devLabels.some((d) => w.bbox[1] - d.bbox[3] > -0.5 && w.bbox[1] - d.bbox[3] < 4 && w.c[0] > d.bbox[0] - 2 && w.c[0] < d.bbox[2] + 6)) continue;
       const nn = nearestNet(w.c[0], w.c[1], 3.0, w.bbox);
@@ -365,9 +374,23 @@
       const [x, y] = w.c;
       const top = longH.filter((l) => l.k < y && l.s - 3 < x && l.e + 3 > x).sort((a, b) => b.k - a.k)[0];
       const bot = longH.filter((l) => l.k > y && l.s - 3 < x && l.e + 3 > x).sort((a, b) => a.k - b.k)[0];
-      const lef = longV.filter((l) => l.k < x && l.s - 3 < y && l.e + 3 > y).sort((a, b) => b.k - a.k)[0];
-      const rig = longV.filter((l) => l.k > x && l.s - 3 < y && l.e + 3 > y).sort((a, b) => a.k - b.k)[0];
-      const rect = [lef ? lef.k : (top ? top.s : -Infinity), top ? top.k : -Infinity, rig ? rig.k : (top ? top.e : Infinity), bot ? bot.k : Infinity];
+      // the box spans where its top and bottom edges overlap; a side must run along most of the box height
+      // (a short dashed mechanical link beside the label is not a side)
+      const hs = Math.max(top ? top.s : -Infinity, bot ? bot.s : -Infinity), he = Math.min(top ? top.e : Infinity, bot ? bot.e : Infinity);
+      const y0 = top ? top.k : -Infinity, y1 = bot ? bot.k : Infinity;
+      const side = (l) => l.k > hs - 3 && l.k < he + 3 && l.s - 3 < y && l.e + 3 > y &&
+        (!isFinite(y0) || !isFinite(y1) || (Math.min(l.e, y1) - Math.max(l.s, y0)) > 0.6 * (y1 - y0));
+      const lef = longV.filter((l) => l.k < x && side(l)).sort((a, b) => b.k - a.k)[0];
+      const rig = longV.filter((l) => l.k > x && side(l)).sort((a, b) => a.k - b.k)[0];
+      let rect = [lef ? lef.k : hs, y0, rig ? rig.k : he, y1];
+      // tall boxes may have only their vertical sides found: the box spans where both sides overlap
+      const vl = longV.filter((l) => l.k < x && l.s - 3 < y && l.e + 3 > y).sort((a, b) => b.k - a.k)[0];
+      const vr = longV.filter((l) => l.k > x && l.s - 3 < y && l.e + 3 > y).sort((a, b) => a.k - b.k)[0];
+      if (vl && vr) {
+        const alt = [vl.k, Math.max(vl.s, vr.s), vr.k, Math.min(vl.e, vr.e)];
+        const area = (r) => (isFinite(r[2] - r[0]) && isFinite(r[3] - r[1]) ? (r[2] - r[0]) * (r[3] - r[1]) : Infinity);
+        if (area(alt) < area(rect)) rect = alt;
+      }
       if (!isFinite(rect[1]) && !isFinite(rect[3])) continue;
       boxes.push({ text: w.text.replace(/\.$/, ''), rect: rect, area: (rect[2] - rect[0]) * (rect[3] - rect[1]) });
     }
@@ -392,7 +415,7 @@
         xrefs: Array.from(new Set(nt.xrefs)), bbox: nt.bbox, len: nt.len
       };
     });
-    return { sheet: sheet, nodes: nodes, boxes: boxes, nets: nets, segs: segs, dots: dots, terms: termCircles, links: links };
+    return { sheet: sheet, nodes: nodes, boxes: boxes, nets: nets, segs: segs, dots: dots, terms: termCircles, links: links, bounds: boundLines, dashLinks: dashLinks };
   }
 
   const api = { readSheet: readSheet, RX: RX };
