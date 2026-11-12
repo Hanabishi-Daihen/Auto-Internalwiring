@@ -1185,6 +1185,7 @@
     }
   };
   let autoAbort = null;
+  let instDoc = null, instName = '';      // separate Installing / Outline PDF (optional)
   const pdfKey = () => (pdfDoc && pdfDoc.fingerprints && pdfDoc.fingerprints[0]) || (pdfName + ':' + (pdfDoc ? pdfDoc.numPages : 0));
   async function runAuto(preloaded) {
     if (!pdfDoc) { toast('เลือกไฟล์ Schematic PDF ก่อน'); return; }
@@ -1238,14 +1239,19 @@
       for (const c of cabs) {
         const L = c.loc.replace(/^\+/, '').replace(/\.$/, '').toUpperCase();
         const wanted = Array.from(merged.devices.entries()).filter(([, d]) => d.loc.replace(/\.$/, '') === L).map(([k]) => k);
-        for (const pg of A.parsePages(c.outline, pdfDoc.numPages)) {
-          autoLog(`อ่าน Outline หน้า ${pg} (${c.loc})…`, 0.88);
-          const o = await A.readOutline(pdfDoc, pg, window.pdfjsLib.OPS, window.GLYPH_TEMPLATES, wanted);
+        const oDoc = instDoc || pdfDoc;
+        for (const pg of A.parsePages(c.outline, oDoc.numPages)) {
+          autoLog(`อ่าน Outline หน้า ${pg}${instDoc ? ' ของ ' + instName : ''} (${c.loc})…`, 0.88);
+          const o = await A.readOutline(oDoc, pg, window.pdfjsLib.OPS, window.GLYPH_TEMPLATES, wanted);
           o.loc = multi ? L + '.' : c.loc;
+          o.inst = !!instDoc;
           outlines.push(o);
           autoLog(`  พบตำแหน่งอุปกรณ์ ${Object.keys(o.positions).length}/${wanted.length} · รางวายเวย์ ${o.wireways.length}`);
         }
       }
+      // device names printed as real text on the outline correct the stroke reading of the schematic (Q read as 0 ...)
+      const ren = A.applyRenames(merged, outlines);
+      if (ren.length) autoLog(`แก้ชื่ออุปกรณ์ตามข้อความใน Outline ${ren.length} ตัว: ${ren.slice(0, 12).join(', ')}${ren.length > 12 ? ' …' : ''}`);
       autoResult = { method: method, pages: sheets.map((s) => +s.sheet), cabs: cabs, sheets: sheets, merged: merged, outlines: outlines, exclude: new Set(), info: info };
       autoLog(`เสร็จใน ${((Date.now() - t0) / 1000).toFixed(1)} วินาที`, 1);
       renderAutoReview();
@@ -1333,9 +1339,11 @@
     });
     project = P;
     for (const o of r.outlines) {
-      const page = await pdfDoc.getPage(o.page);
-      const id = 'bg' + o.page;
-      await setBackgroundFromPdf(page, page.getViewport({ scale: 1 }), id, `${pdfName.replace(/\.pdf$/i, '')} หน้า ${o.page}`, o.page, o.loc);
+      const doc = o.inst ? instDoc : pdfDoc;
+      if (!doc) { toast('ไม่พบไฟล์ Installing ที่ใช้อ่าน — เลือกไฟล์อีกครั้ง', 6000); continue; }
+      const page = await doc.getPage(o.page);
+      const id = (o.inst ? 'bgI' : 'bg') + o.page;
+      await setBackgroundFromPdf(page, page.getViewport({ scale: 1 }), id, `${(o.inst ? instName : pdfName).replace(/\.pdf$/i, '')} หน้า ${o.page}`, o.page, o.loc);
       o.bg = id;
     }
     const merged = Object.assign({}, r.merged, { nets: r.merged.nets.filter((_, i) => !r.exclude.has(i)) });
@@ -1356,6 +1364,15 @@
       try { await openPdf(f); $('#aPdfName').textContent = `${f.name} · ${pdfDoc.numPages} หน้า`; updateCost(); } catch (err) { toast('เปิด PDF ไม่ได้: ' + err.message); }
       e.target.value = '';
     });
+    $('#aInstFile').addEventListener('change', async (e) => {
+      const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+      try {
+        await ensurePdfWorker();
+        instDoc = await window.pdfjsLib.getDocument({ data: await f.arrayBuffer() }).promise; instName = f.name;
+        $('#aInstName').textContent = `${f.name} · ${instDoc.numPages} หน้า (เลขหน้า Outline ด้านล่างอ้างอิงไฟล์นี้)`; $('#aInstClear').hidden = false;
+      } catch (err) { toast('เปิด PDF ไม่ได้: ' + err.message); }
+    });
+    $('#aInstClear').addEventListener('click', (e) => { e.preventDefault(); instDoc = null; instName = ''; $('#aInstName').textContent = 'ไม่ใช้ — หน้า Outline อยู่ในไฟล์ Schematic'; $('#aInstClear').hidden = true; });
     $('#aAddCab').addEventListener('click', () => { const rows = autoCabRows(); rows.push({ loc: '', outline: '' }); renderAutoCabs(rows); });
     $('#aCabs').addEventListener('click', (e) => {
       const i = e.target.dataset && e.target.dataset.delcab; if (i === undefined) return;

@@ -330,16 +330,37 @@
     const reader = new root.GlyphOCR.Reader(templates);
     const ocr = root.GlyphOCR.readPage(vec.paths, reader);
     ocr.words.forEach((w) => words.push({ text: w.text, x: (w.bbox[0] + w.bbox[2]) / 2, y: (w.bbox[1] + w.bbox[3]) / 2, rot: w.rot, bbox: w.bbox, src: 'ocr' }));
+    // installing drawings drawn at a larger scale have bigger letters: read once more for text up to 16 pt
+    const big = root.GlyphOCR.readPage(vec.paths, reader, { maxChar: 16 });
+    big.words.filter((w) => Math.max(w.bbox[2] - w.bbox[0], w.bbox[3] - w.bbox[1]) > 0 && w.H > 4.5)
+      .forEach((w) => { words.push({ text: w.text, x: (w.bbox[0] + w.bbox[2]) / 2, y: (w.bbox[1] + w.bbox[3]) / 2, rot: w.rot, bbox: w.bbox, src: 'ocr' }); ocr.words.push(w); });
     // device matches
-    const pos = {};
+    const pos = {}, renames = {};
     const canon = (s) => s.replace(/^\+[A-Z0-9]+-/, '-').replace(/^-/, '').replace(/^[A-Z]{2,4}-TB-/, '').toUpperCase();
+    // characters the stroke reader confuses (Q read as 0, B as 8 ...): equal for a second, looser match
+    const loose = (s) => canon(s).replace(/[QOD]/g, '0').replace(/B/g, '8').replace(/S/g, '5').replace(/I/g, '1').replace(/Z/g, '2').replace(/G/g, '6');
     const want = new Map(); (wanted || []).forEach((k) => { const c = canon(k); if (!want.has(c)) want.set(c, []); want.get(c).push(k); });
+    const usable = (w, c) => !((c.length <= 2 || /^\d+$/.test(c)) && !/^[-+]/.test(w.text));
     for (const w of words) {
       const c = canon(w.text);
       // short or all-digit names ("-1", "-27") must carry their dash on the outline too,
       // otherwise the frame's grid numbers 1..9 would be taken for devices
-      if ((c.length <= 2 || /^\d+$/.test(c)) && !/^[-+]/.test(w.text)) continue;
+      if (!usable(w, c)) continue;
       if (want.has(c)) for (const key of want.get(c)) if (!pos[key]) pos[key] = { x: w.x, y: w.y, src: w.src };
+    }
+    // looser match for devices still missing; real PDF text on the outline also corrects the schematic name
+    const wantLoose = new Map();
+    (wanted || []).filter((k) => !pos[k]).forEach((k) => { const l = loose(k); if (!wantLoose.has(l)) wantLoose.set(l, []); wantLoose.get(l).push(k); });
+    const wordLoose = new Map();
+    for (const w of words) { const c = canon(w.text); if (!usable(w, c) || c.length < 2) continue; const l = loose(w.text); if (!wordLoose.has(l)) wordLoose.set(l, []); wordLoose.get(l).push(w); }
+    for (const [l, keys] of wantLoose) {
+      const ws = wordLoose.get(l);
+      if (!ws || keys.length !== 1) continue;
+      const texts = new Set(ws.map((w) => canon(w.text)));
+      if (texts.size !== 1) continue;                 // two different labels look alike: leave it to the user
+      const w = ws.find((x) => x.src === 'text') || ws[0], key = keys[0];
+      pos[key] = { x: w.x, y: w.y, src: w.src + '~' };
+      if (w.src === 'text' && canon(w.text) !== canon(key)) renames[key] = ((key.match(/^(\+[A-Z0-9]+)-/) || [])[1] || '') + '-' + canon(w.text);
     }
     // wireways: 'WIRE WAY' text sits in the middle of the duct
     const wireways = [];
@@ -365,7 +386,21 @@
       }
       if (best) wireways.push(horiz ? [best.s, cy, best.e, cy] : [cx, best.s, cx, best.e]);
     }
-    return { page: pg, width: vp.width, height: vp.height, positions: pos, wireways: wireways, words: words.length };
+    return { page: pg, width: vp.width, height: vp.height, positions: pos, renames: renames, wireways: wireways, words: words.length };
+  }
+
+  /** rename devices (schematic stroke reading → outline PDF text), in the nets, the device list and outline positions */
+  function applyRenames(merged, outlines) {
+    const ren = {};
+    outlines.forEach((o) => Object.assign(ren, o.renames || {}));
+    const keys = Object.keys(ren); if (!keys.length) return [];
+    const fix = (ref) => { const i = ref.lastIndexOf(':'); const d = ref.slice(0, i); return ren[d] ? ren[d] + ref.slice(i) : ref; };
+    merged.nets.forEach((n) => { n.pins.forEach((p) => { p[0] = fix(p[0]); }); });
+    keys.forEach((k) => {
+      if (merged.devices.has(k)) { const d = merged.devices.get(k); merged.devices.delete(k); merged.devices.set(ren[k], Object.assign({}, d, { name: ren[k] })); }
+      outlines.forEach((o) => { if (o.positions[k]) { o.positions[ren[k]] = o.positions[k]; delete o.positions[k]; } });
+    });
+    return keys.map((k) => `${k} → ${ren[k]}`);
   }
 
   // ---------------------------------------------------------------- project
@@ -405,7 +440,7 @@
     return { project: P, placed: placed };
   }
 
-  const api = { parsePages: parsePages, readSheetsA: readSheetsA, readSheetsB: readSheetsB, crossCheck: crossCheck, costOf: costOf, PRICE: PRICE, mergeSheets: mergeSheets, readOutline: readOutline, buildProject: buildProject, AI_SCHEMA: AI_SCHEMA };
+  const api = { parsePages: parsePages, readSheetsA: readSheetsA, readSheetsB: readSheetsB, crossCheck: crossCheck, costOf: costOf, PRICE: PRICE, mergeSheets: mergeSheets, readOutline: readOutline, applyRenames: applyRenames, buildProject: buildProject, AI_SCHEMA: AI_SCHEMA };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.AutoBuild = api;
 })(typeof window !== 'undefined' ? window : this);

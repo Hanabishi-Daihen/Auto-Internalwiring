@@ -6,7 +6,7 @@
  */
 (function (root) {
   'use strict';
-  const N = 24, SMALL = 6.5, TOL = 0.25, TOUCH = 0.18;
+  const N = 24, DEF_SMALL = 6.5, TOL = 0.25, TOUCH = 0.18;
 
   // ---------------------------------------------------------------- rasterising
   function bboxOf(polys) {
@@ -95,7 +95,8 @@
   }
 
   // ---------------------------------------------------------------- 1) characters
-  function clusters(paths) {
+  function clusters(paths, maxChar) {
+    const SMALL = maxChar || DEF_SMALL;
     const small = paths.filter((p) => p.stroke && !p.fill && Math.max(p.bbox[2] - p.bbox[0], p.bbox[3] - p.bbox[1]) < SMALL);
     const n = small.length, par = new Int32Array(n).map((_, i) => i);
     const f = (x) => { while (par[x] !== x) { par[x] = par[par[x]]; x = par[x]; } return x; };
@@ -137,7 +138,9 @@
   }
 
   // ---------------------------------------------------------------- 2) page reading
-  function readPage(paths, reader) {
+  /** opts.maxChar: largest character size in points (default 6.5; larger for drawings with big text) */
+  function readPage(paths, reader, opts) {
+    const maxChar = (opts && opts.maxChar) || DEF_SMALL, sc = maxChar / DEF_SMALL;
     // endpoints of every stroke, used to recognise terminal circles (a wire ends on the circle)
     const E = [];
     paths.forEach((p, i) => { if (p.stroke) for (const pl of p.polys) { E.push([pl[0][0], pl[0][1], i]); E.push([pl[pl.length - 1][0], pl[pl.length - 1][1], i]); } });
@@ -168,7 +171,7 @@
       return best ? best[1] : null;
     };
     const res = [];
-    for (const c of clusters(paths)) {
+    for (const c of clusters(paths, maxChar)) {
       if (terminalCircle(c)) { c.terminal = true; res.push([c, {}]); continue; }
       const b = reader.classify(c.polys);
       const w = c.bbox[2] - c.bbox[0], h = c.bbox[3] - c.bbox[1];
@@ -182,8 +185,8 @@
       else if (Math.max(w, h) < 1.2 && Math.min(w, h) > 0.5) it.kind = 'junction';
       else if (Object.keys(best).length && top(best) >= 0.8 && Math.max(w, h) >= 1.2) it.kind = 'char';
       else if (Math.max(w, h) < 0.45) it.kind = 'dot';
-      else if (h < 0.12 * w && w < 6.5) it.kind = 'hline';
-      else if (w < 0.12 * h && h < 6.5) it.kind = 'vline';
+      else if (h < 0.12 * w && w < 6.5 * sc) it.kind = 'hline';
+      else if (w < 0.12 * h && h < 6.5 * sc) it.kind = 'vline';
       return it;
     });
     return { words: assemble(items), items: items };
@@ -301,7 +304,7 @@
     return c.join('');
   }
 
-  const api = { Reader: Reader, readPage: readPage, clusters: clusters, bitmap: bitmap };
+  const api = { Reader: Reader, readPage: readPage, clusters: clusters, bitmap: bitmap, dilate: dilate };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.GlyphOCR = api;
 })(typeof window !== 'undefined' ? window : this);
