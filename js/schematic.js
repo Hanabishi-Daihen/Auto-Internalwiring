@@ -306,14 +306,16 @@
       const b = w.bbox, cx = (b[0] + b[2]) / 2, cy = (b[1] + b[3]) / 2;
       return near(cx, cy).concat(near(b[0], b[1]), near(b[2], b[3])).some((j) => {
         const sg = segs[j];
-        return [[sg[0], sg[1]], [sg[2], sg[3]]].some(([px, py]) => px > b[0] + 0.1 && px < b[2] - 0.1 && py > b[1] + 0.1 && py < b[3] - 0.1);
+        return [[sg[0], sg[1]], [sg[2], sg[3]]].some(([px, py]) => px > b[0] - 0.15 && px < b[2] + 0.15 && py > b[1] - 0.15 && py < b[3] + 0.15);
       });
     };
     const used = new Set(termWords);
     const pinCands = [];
     for (const w of W) {
       if (used.has(w) || RX.device.test(w.text) || RX.xref.test(w.text) || RX.loc.test(w.text)) continue;
-      if (!RX.pin.test(w.text) || w.text.length > 4) continue;
+      // letters + two digits (FC10) look like wire numbers: kept as pins only if a device box names them
+      const weak = !RX.pin.test(w.text) && /^[A-Z]{1,3}\d{2}$/.test(w.text);
+      if ((!RX.pin.test(w.text) && !weak) || w.text.length > 5) continue;
       // symbol parts (contact arcs read as C or 0, a coil stroke read as I) touch the wire they belong to; text never does
       if (touchesWire(w)) continue;
       // text just under a device label is its cross reference (/10.G3), not a pin
@@ -326,7 +328,7 @@
         const ld = labelLeftOf(l.x0, l.y, 34, 15);
         if (ld && (!dev || dev[1] > 18)) dev = [ld[0], 18];
       }
-      pinCands.push({ w: w, nn: nn, dev: dev, linked: lk.length > 0 });
+      pinCands.push({ w: w, nn: nn, dev: weak ? null : dev, linked: lk.length > 0, weak: weak });
       used.add(w);
     }
     // multi-pole symbols: pins 1-3-5 (or 2-4-6) in one row belong to one device; the label of the
@@ -371,13 +373,32 @@
     }
     // pins written above and below the same component box (1 over 2, 3 over 4 ...) are one device:
     // the pin far from the label inherits the device found for its partner
+    // boxes of one height that touch side by side form a row of cells
+    const chainOf = (b) => {
+      const same = (q) => Math.abs(q[1] - b[1]) < 0.5 && Math.abs(q[3] - b[3]) < 0.5;
+      let x0 = b[0], x1 = b[2], n = 1, grew = true;
+      while (grew) {
+        grew = false;
+        for (const q of devBoxes) {
+          if (!same(q)) continue;
+          if (Math.abs(q[2] - x0) < 0.6 && q[0] < x0) { x0 = q[0]; n++; grew = true; }
+          if (Math.abs(q[0] - x1) < 0.6 && q[2] > x1) { x1 = q[2]; n++; grew = true; }
+        }
+      }
+      const r = [x0, b[1], x1, b[3]]; r.n = n; return r;
+    };
     // a device label written inside a box names the pins along that box
     for (const pc of pinCands) {
       const w = pc.w;
       const bx = devBoxes.filter((b) => w.c[0] >= b[0] - 1 && w.c[0] <= b[2] + 1 && Math.max(b[1] - w.bbox[3], w.bbox[1] - b[3]) < 8 && Math.max(b[1] - w.bbox[3], w.bbox[1] - b[3]) > -1);
       for (const b of bx) {
         const lab = pinLabels.find((d) => /[A-Z]/.test(d.text) && d.c[0] > b[0] && d.c[0] < b[2] && d.c[1] > b[1] && d.c[1] < b[3]);
-        if (lab) { pc.dev = [lab, 4]; break; }
+        if (lab) { pc.dev = [lab, 4]; pc.boxed = true; break; }
+        // a row of joined cells is one unit (annunciator AN1..AN18): its label sits in the same band, left of the cells
+        const ch = chainOf(b);
+        const lab2 = pinLabels.filter((d) => /[A-Z]/.test(d.text) && d.c[1] > ch[1] && d.c[1] < ch[3] && d.c[0] < ch[2] && d.c[0] > ch[0] - 160)
+          .sort((a, c) => Math.abs(a.c[0] - ch[0]) - Math.abs(c.c[0] - ch[0]))[0];
+        if (lab2 && ch.n >= 3 && (!pc.dev || pc.dev[1] > 6)) { pc.dev = [lab2, 6]; pc.boxed = true; break; }
       }
     }
     const byBody = new Map();
@@ -394,7 +415,7 @@
     }
     for (const r of rowsP) {
       for (const pc of r) {
-        if (!pc.dev) { used.delete(pc.w); continue; }
+        if (!pc.dev || (pc.weak && !pc.boxed)) { used.delete(pc.w); continue; }
         nets[pc.nn.net].pins.push({ dev: pc.dev[0].text, pin: pc.w.text, x: pc.w.c[0], y: pc.w.c[1], word: pc.w, d: pc.dev[1] });
       }
     }
@@ -407,7 +428,7 @@
     }
     // cross-sheet references: '/08.B1' next to an arrow at a wire end
     for (const x of xrefs) {
-      const nn = nearestNet(x.c[0], x.c[1], 8);
+      const nn = nearestNet(x.c[0], x.c[1], 8, x.bbox);
       if (nn) nets[nn.net].xrefs.push(x.text);
     }
     // location boxes (+TR, +MCC, +LCC, +RCC ...): the dashed rectangle around a '+XXX' word

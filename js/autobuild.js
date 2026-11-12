@@ -59,8 +59,9 @@
       const vec = await root.PdfVec.extractPaths(page, OPS);
       const ocr = root.GlyphOCR.readPage(vec.paths, reader);
       // some drawings write the cabinet labels (+LCC. / +RCC.) as real PDF text, not strokes
-      (await textTokens(page)).filter((t) => /^\+[A-Z][A-Z0-9]*\.?$/.test(t.text))
-        .forEach((t) => ocr.words.push({ text: t.text, rot: t.rot, bbox: t.bbox, H: t.bbox[3] - t.bbox[1], chars: [], prefix: '+', src: 'text' }));
+      // (and some device names: -AN on PP1047A sheet 18)
+      (await textTokens(page)).filter((t) => /^\+[A-Z][A-Z0-9]*\.?$/.test(t.text) || /^-[A-Z0-9][A-Z0-9.\-]*[A-Z0-9]$/.test(t.text))
+        .forEach((t) => ocr.words.push({ text: t.text, rot: t.rot, bbox: t.bbox, H: t.rot ? t.bbox[2] - t.bbox[0] : t.bbox[3] - t.bbox[1], chars: [], prefix: t.text[0], src: 'text' }));
       const sh = root.SchematicReader.readSheet(vec, ocr, pad2(pg));
       sheets.push({ sheet: pad2(pg), nodes: sh.nodes, boxes: sh.boxes, words: ocr.words.length, method: 'A' });
     }
